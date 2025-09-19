@@ -13,15 +13,18 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 }
 #endif
 
-#define DAY_NIGHT_DURATION_SECONDS (48.0f * 60.0f) // 48 реальных минут на 24 игровых часа
+// === ИСПРАВЛЕНИЕ 2: Убираем магические числа ===
+#define MAX_INPUT_LENGTH 100
+#define CONFIG_LINE_SIZE 256
+#define CONFIG_KEY_SIZE 64
+
+#define DAY_NIGHT_DURATION_SECONDS (48.0f * 60.0f)
 #define SKY_RADIUS 100.0f
-// Screen dimensions
 #define WIDTH 1920
 #define HEIGHT 1080
 
-// --- НОВЫЕ КОНСТАНТЫ ДЛЯ УПРАВЛЕНИЯ ---
-#define AIR_ACCELERATION 2.0f      // Насколько сильно можно менять направление в полете (слабый контроль)
-#define AIR_DECELERATION 0.5f      // Насколько быстро скорость снижается, когда не давишь на кнопки
+#define AIR_ACCELERATION 2.0f
+#define AIR_DECELERATION 0.5f
 #define JUMP_FORWARD_IMPULSE 0.15f
 #define STANDING_HEIGHT 1.0f
 #define CROUCHING_HEIGHT 0.5f
@@ -33,7 +36,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #define BOSS_VULNERABLE_DURATION 5.0f
 #define MAX_GLITCHES 5
 #define GLITCH_SPEED 3.0f
-// [НОВЫЙ КОД] Константы для механики в стиле Alyx
+
 #define RAYCAST_MAX_DISTANCE 20.0f
 #define PULL_FORCE 25.0f
 #define TRAJECTORY_STEPS 40
@@ -68,15 +71,11 @@ typedef struct {
 } GameConfig;
 
 typedef struct {
-    float timeOfDay; // 0.0 - полночь, 0.25 - восход, 0.5 - полдень, 0.75 - закат
-
-    // Текущие цвета, которые будут использоваться для рендеринга
+    float timeOfDay;
     SDL_Color skyTopColor;
     SDL_Color skyBottomColor;
-    SDL_Color ambientLightColor; // Цвет "окружающего света" для затемнения объектов
+    SDL_Color ambientLightColor;
     SDL_Color fogColor;
-
-    // Позиции небесных тел
     Vec3 sunPos;
     Vec3 moonPos;
 } DayNightCycle;
@@ -122,10 +121,10 @@ typedef enum {
 } PickupType;
 
 typedef enum {
-    PICKUP_STATE_IDLE,      // Лежит на месте
-    PICKUP_STATE_HELD,      // В руке игрока
-    PICKUP_STATE_THROWN,    // Летит после броска
-    PICKUP_STATE_BROKEN,     // Разбит (для бутылки)
+    PICKUP_STATE_IDLE,
+    PICKUP_STATE_HELD,
+    PICKUP_STATE_THROWN,
+    PICKUP_STATE_BROKEN,
     PICKUP_STATE_PULLED
 } PickupState;
 
@@ -138,18 +137,16 @@ typedef struct {
     PickupType type;
     PickupState state;
     
-    float health;           // Прочность (для разбивания)
+    float health;
     float mass;
     float bounciness;
     
-    // Для отрисовки
     Vec3 size;
     SDL_Color color;
     SDL_Color originalColor;
     
-    // Для разбивания
     int breakable;
-    float breakThreshold;   // Минимальная сила для разбивания
+    float breakThreshold;
 } PickupObject;
 
 typedef struct {
@@ -161,65 +158,55 @@ typedef struct {
     SDL_Color color;
 } GlassShard;
 
-// --- СИСТЕМА РУК ---
 typedef enum {
-    HAND_STATE_IDLE,         // Покой
-    HAND_STATE_WALKING,      // Ходьба
-    HAND_STATE_RUNNING,      // Бег
-    HAND_STATE_JUMPING,      // Прыжок
-    HAND_STATE_REACHING,     // Тянется к объекту
-    HAND_STATE_HOLDING,      // Держит объект
-    HAND_STATE_THROWING,     // Бросает
+    HAND_STATE_IDLE,
+    HAND_STATE_WALKING,
+    HAND_STATE_RUNNING,
+    HAND_STATE_JUMPING,
+    HAND_STATE_REACHING,
+    HAND_STATE_HOLDING,
+    HAND_STATE_THROWING,
     HAND_STATE_INSPECTING,
-    HAND_STATE_AIMING,      // Целится лучом
-    HAND_STATE_PULLING,  // Осматривает руки (F)
+    HAND_STATE_AIMING,
+    HAND_STATE_PULLING,
 } HandState;
 
-// [НОВЫЙ КОД] Симуляция флика (рывка кистью)
 typedef struct {
     int isActive;
-    float progress; // 0.0 -> 1.0 -> 0.0
+    float progress;
 } HandFlickGesture;
 
 typedef struct {
-    // Позиции относительно камеры
     Vec3 leftPos;
     Vec3 rightPos;
     
-    // Ротации
     Vec3 leftRot;
     Vec3 rightRot;
     
-    // Состояние и анимация
     HandState currentState;
     HandState targetState;
-    float stateTransition;    // 0.0 - 1.0 для плавных переходов
+    float stateTransition;
     
-    // Анимационные фазы
     float walkPhase;
     float runPhase;
     float inspectPhase;
     float throwPhase;
     float idlePhase;
     
-    // Ссылка на держимый объект
     PickupObject* heldObject;
-    // [ИЗМЕНЕНО] Параметры для механики Alyx
     float reachDistance;
-    PickupObject* targetedObject; // Объект, на который наведен луч
-    PickupObject* pulledObject;   // Объект, который сейчас летит к нам
-    HandFlickGesture flick;       // Анимация флика
-    float currentThrowPower;      // Текущая сила броска
+    PickupObject* targetedObject;
+    PickupObject* pulledObject;
+    HandFlickGesture flick;
+    float currentThrowPower;
 } HandsSystem;
 
-// [НОВЫЙ КОД] Структура для траектории
 typedef struct {
     Vec3 points[TRAJECTORY_STEPS];
     int numPoints;
     int didHit;
 } Trajectory;
 
-// --- НОВАЯ СТРУКТУРА ДЛЯ МОНЕТ ---
 typedef struct {
     Vec3 pos;
     int collected;
@@ -244,21 +231,20 @@ typedef struct {
 } EditableVariable;
 
 typedef enum {
-    PHONE_STATE_HIDDEN,    // Полностью убран
-    PHONE_STATE_SHOWING,   // Появляется (анимация "вверх")
-    PHONE_STATE_VISIBLE,   // На экране
-    PHONE_STATE_HIDING     // Убирается (анимация "вниз")
+    PHONE_STATE_HIDDEN,
+    PHONE_STATE_SHOWING,
+    PHONE_STATE_VISIBLE,
+    PHONE_STATE_HIDING
 } PhoneState;
 
-// Структура для хранения состояния телефона
 typedef struct {
     PhoneState state;
-    float animationProgress; // 0.0 = убран, 1.0 = показан
+    float animationProgress;
 } Phone;
 
 typedef enum {
     QUEST_LOCKED,
-    QUEST_AVAILABLE, 
+    QUEST_AVAILABLE,
     QUEST_ACTIVE,
     QUEST_COMPLETED
 } QuestStatus;
@@ -326,9 +312,8 @@ typedef struct {
     float maxHealth;
     
     BossState state;
-    float stateTimer; // Таймер для текущего состояния
+    float stateTimer;
 
-    // Параметры для отрисовки
     Vec3 bodySize;
     Vec3 hammerSize;
 } Boss;
@@ -337,43 +322,38 @@ typedef struct {
     Vec3 pos;
     Vec3 velocity;
     int active;
-    float jitter; // Для эффекта дрожания
+    float jitter;
 } GlitchByte;
 
 typedef enum {
-    WORLD_STATE_WIREFRAME,        // 0-10 монет: только линии
-    WORLD_STATE_GRID_GROWING,      // 10-15 монет: сетка растёт по стенам
-    WORLD_STATE_CUBE_COMPLETE,     // 15-20 монет: куб сформирован
-    WORLD_STATE_MATERIALIZING,     // 20-30 монет: появляются полигоны
-    WORLD_STATE_TEXTURED,         // 30-40 монет: текстуры и освещение
-    WORLD_STATE_REALISTIC         // 40+ монет: полный рендер со скайбоксом
+    WORLD_STATE_WIREFRAME,
+    WORLD_STATE_GRID_GROWING,
+    WORLD_STATE_CUBE_COMPLETE,
+    WORLD_STATE_MATERIALIZING,
+    WORLD_STATE_TEXTURED,
+    WORLD_STATE_REALISTIC
 } WorldState;
 
 typedef struct {
     WorldState currentState;
-    float transitionProgress;  // 0.0 - 1.0 для плавных переходов
+    float transitionProgress;
     
-    // Параметры сетки-куба
-    float gridWallHeight;      // Насколько высоко поднялись стены
-    float gridDensity;         // Плотность линий сетки
-    float gridPulse;           // Пульсация для эффекта
+    float gridWallHeight;
+    float gridDensity;
+    float gridPulse;
     
-    // Параметры материализации
-    float polygonOpacity;      // Прозрачность полигонов
-    float textureBlend;        // Смешивание с текстурами
+    float polygonOpacity;
+    float textureBlend;
     
-    // Скайбокс
     int skyboxEnabled;
     float skyboxAlpha;
     SDL_Color skyGradientTop;
     SDL_Color skyGradientBottom;
     
-    // Эффекты
-    float glitchIntensity;     // Глюки при переходах
-    float chromaAberration;    // Хроматические аберрации
+    float glitchIntensity;
+    float chromaAberration;
 } WorldEvolution;
 
-// Глобальная переменная эволюции мира
 WorldEvolution g_worldEvolution = {
     .currentState = WORLD_STATE_WIREFRAME,
     .transitionProgress = 0.0f,
@@ -384,39 +364,85 @@ WorldEvolution g_worldEvolution = {
     .textureBlend = 0.0f,
     .skyboxEnabled = 0,
     .skyboxAlpha = 0.0f,
-    .skyGradientTop = {100, 120, 140, 255},      // Приглушенный верх
-    .skyGradientBottom = {180, 190, 200, 255},  // Приглушенный низ
+    .skyGradientTop = {100, 120, 140, 255},
+    .skyGradientBottom = {180, 190, 200, 255},
     .glitchIntensity = 0.0f,
     .chromaAberration = 0.0f
 };
 
-// Категории, которые мы будем измерять
 typedef enum {
-    PROF_GAME_LOGIC,     // Обновление квестов, босса, монет, эволюции мира
-    PROF_PHYSICS_COLLISIONS, // Движение игрока, гравитация, проверки столкновекновений
-    PROF_RENDERING,      // Все функции отрисовки (draw...)
-    PROF_OTHER,          // Все остальное, что не попало в другие категории
-    PROF_CATEGORY_COUNT  // Общее количество категорий
+    PROF_GAME_LOGIC,
+    PROF_PHYSICS_COLLISIONS,
+    PROF_RENDERING,
+    PROF_OTHER,
+    PROF_CATEGORY_COUNT
 } ProfilerCategory;
 
-// Структура для хранения данных одной категории
 typedef struct {
     const char* name;
-    Uint64 startTime;       // Время начала замера в текущем кадре
-    Uint64 elapsedTicks;    // Накопленное время (в тиках) за период
-    Uint32 calls;           // Количество вызовов за период
+    Uint64 startTime;
+    Uint64 elapsedTicks;
+    Uint32 calls;
     
-    // Данные для отображения (обновляются раз в секунду)
     float percentage;
     Uint32 callsPerSecond;
     SDL_Color color;
 } ProfilerData;
 
-// Глобальный массив с данными профилировщика
+// === ИСПРАВЛЕНИЕ 3: Переименовываем глобальные переменные для ясности ===
 ProfilerData g_profilerData[PROF_CATEGORY_COUNT];
-int g_showProfiler = 0; // Переключатель видимости
-Uint64 g_perfFrequency; // Частота счетчика производительности
-Uint32 g_profilerUpdateTime = 0; // Время последнего обновления статистики
+int g_showProfiler = 0;
+Uint64 g_perfFrequency;
+Uint32 g_profilerUpdateTime = 0;
+
+Boss g_rknChan;
+GlitchByte g_glitchBytes[MAX_GLITCHES];
+int g_activeGlitches = 0;
+int g_bossFightActive = 0;
+
+int g_coinsCollected = 0;
+Coin g_coins[50];
+int g_numCoins = 0;
+Phone g_phone;
+DayNightCycle g_dayNight;
+float g_zBuffer[HEIGHT][WIDTH];
+float g_timeScale = 1.0f;
+PickupObject g_pickups[MAX_PICKUPS];
+int g_numPickups = 0;
+
+GlassShard g_shards[MAX_SHARDS];
+int g_numShards = 0;
+Trajectory g_trajectory;
+HandsSystem g_hands;
+
+// === ИСПРАВЛЕНИЕ 4: Выносим логику в отдельные функции ===
+
+// Функция для безопасного чтения строки из файла конфигурации
+int readConfigLine(FILE* file, char* buffer, size_t bufferSize) {
+    if (fgets(buffer, bufferSize, file) == NULL) {
+        return 0;
+    }
+    // Удаляем символ новой строки
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len-1] == '\n') {
+        buffer[len-1] = '\0';
+    }
+    return 1;
+}
+
+// Функция для парсинга значения из строки конфигурации
+int parseConfigValue(const char* line, const char* key, float* value) {
+    char lineKey[CONFIG_KEY_SIZE];
+    float lineValue;
+    
+    if (sscanf(line, "%63[^=]=%f", lineKey, &lineValue) == 2) {
+        if (strcmp(lineKey, key) == 0) {
+            *value = lineValue;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void drawText(SDL_Renderer* renderer, TTF_Font* font, const char* text, int x, int y, SDL_Color color) {
     SDL_Surface* surface = TTF_RenderText_Solid(font, text, color);
@@ -433,7 +459,6 @@ void drawText(SDL_Renderer* renderer, TTF_Font* font, const char* text, int x, i
 
 SDL_Color lerpColor(SDL_Color a, SDL_Color b, float t);
 
-// Функция инициализации. Вызвать один раз в main().
 void Profiler_Init() {
     g_perfFrequency = SDL_GetPerformanceFrequency();
     
@@ -445,25 +470,22 @@ void Profiler_Init() {
     g_profilerUpdateTime = SDL_GetTicks();
 }
 
-// Начать замер для категории
 void Profiler_Start(ProfilerCategory category) {
     if (!g_showProfiler) return;
     g_profilerData[category].startTime = SDL_GetPerformanceCounter();
 }
 
-// Закончить замер для категории
 void Profiler_End(ProfilerCategory category) {
     if (!g_showProfiler) return;
     g_profilerData[category].elapsedTicks += SDL_GetPerformanceCounter() - g_profilerData[category].startTime;
     g_profilerData[category].calls++;
 }
 
-// Обновление статистики (вызывать раз в кадр)
 void Profiler_Update() {
     if (!g_showProfiler) return;
     
     Uint32 currentTime = SDL_GetTicks();
-    if (currentTime - g_profilerUpdateTime >= 1000) { // Обновляем раз в секунду
+    if (currentTime - g_profilerUpdateTime >= 1000) {
         
         Uint64 totalTicks = 0;
         for (int i = 0; i < PROF_CATEGORY_COUNT; i++) {
@@ -475,7 +497,6 @@ void Profiler_Update() {
                 g_profilerData[i].percentage = ((double)g_profilerData[i].elapsedTicks / totalTicks) * 100.0;
                 g_profilerData[i].callsPerSecond = g_profilerData[i].calls;
                 
-                // Сбрасываем счетчики для следующей секунды
                 g_profilerData[i].elapsedTicks = 0;
                 g_profilerData[i].calls = 0;
             }
@@ -484,7 +505,6 @@ void Profiler_Update() {
     }
 }
 
-// Отрисовка интерфейса профилировщика (вызывать в конце цикла рендеринга)
 void Profiler_Draw(SDL_Renderer* ren, TTF_Font* font) {
     if (!g_showProfiler) return;
 
@@ -493,46 +513,22 @@ void Profiler_Draw(SDL_Renderer* ren, TTF_Font* font) {
     for (int i = 0; i < PROF_CATEGORY_COUNT; i++) {
         ProfilerData* data = &g_profilerData[i];
         
-        // Рисуем фон полоски
         SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(ren, data->color.r, data->color.g, data->color.b, 80);
         SDL_Rect bgRect = {x, y + i * h, w, h - 5};
         SDL_RenderFillRect(ren, &bgRect);
         
-        // Рисуем полоску производительности
         int barWidth = (int)(w * (data->percentage / 100.0f));
         SDL_SetRenderDrawColor(ren, data->color.r, data->color.g, data->color.b, 255);
         SDL_Rect barRect = {x, y + i * h, barWidth, h - 5};
         SDL_RenderFillRect(ren, &barRect);
         
-        // Рисуем текст
         char buffer[128];
         snprintf(buffer, 128, "%s: %u /s  (%.0f%%)", data->name, data->callsPerSecond, data->percentage);
         SDL_Color white = {255, 255, 255, 255};
         drawText(ren, font, buffer, x + 5, y + i * h + 2, white);
     }
 }
-
-// Глобальная переменная для босса
-Boss g_rknChan;
-GlitchByte g_glitchBytes[MAX_GLITCHES];
-int g_activeGlitches = 0;
-int g_bossFightActive = 0;
-// --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ИГРОВОГО СОСТОЯНИЯ ---
-int g_coinsCollected = 0;
-Coin g_coins[50];
-int g_numCoins = 0;
-Phone g_phone;
-DayNightCycle g_dayNight;
-float g_zBuffer[HEIGHT][WIDTH];
-float g_timeScale = 1.0f;
-PickupObject g_pickups[MAX_PICKUPS];
-int g_numPickups = 0;
-
-GlassShard g_shards[MAX_SHARDS];
-int g_numShards = 0;
-Trajectory g_trajectory; // [НОВЫЙ КОД]
-HandsSystem g_hands;
 
 // ИСПРАВЛЯЕМ: Инициализируем коллизии ДО квестов
     CollisionBox collisionBoxes[] = {
@@ -3440,22 +3436,19 @@ void loadConfig(const char* filename, GameConfig* config) {
         return;
     }
     
-    char line[256];
-    while (fgets(line, sizeof(line), file)) {
-        char key[64];
-        float value;
-        
-        if (sscanf(line, "%63[^=]=%f", key, &value) == 2) {
-            if (strcmp(key, "mouseSensitivity") == 0) config->mouseSensitivity = value;
-            else if (strcmp(key, "walkSpeed") == 0) config->walkSpeed = value;
-            else if (strcmp(key, "runSpeed") == 0) config->runSpeed = value;
-            else if (strcmp(key, "crouchSpeedMultiplier") == 0) config->crouchSpeedMultiplier = value;
-            else if (strcmp(key, "acceleration") == 0) config->acceleration = value;
-            else if (strcmp(key, "deceleration") == 0) config->deceleration = value;
-            else if (strcmp(key, "jumpForce") == 0) config->jumpForce = value;
-            else if (strcmp(key, "gravity") == 0) config->gravity = value;
-            else if (strcmp(key, "fov") == 0) config->fov = value;
-        }
+    // === ИСПРАВЛЕНИЕ 1: Используем безопасное чтение ===
+    char line[CONFIG_LINE_SIZE];
+    while (readConfigLine(file, line, sizeof(line))) {
+        // Пробуем распарсить каждое возможное значение
+        parseConfigValue(line, "mouseSensitivity", &config->mouseSensitivity);
+        parseConfigValue(line, "walkSpeed", &config->walkSpeed);
+        parseConfigValue(line, "runSpeed", &config->runSpeed);
+        parseConfigValue(line, "crouchSpeedMultiplier", &config->crouchSpeedMultiplier);
+        parseConfigValue(line, "acceleration", &config->acceleration);
+        parseConfigValue(line, "deceleration", &config->deceleration);
+        parseConfigValue(line, "jumpForce", &config->jumpForce);
+        parseConfigValue(line, "gravity", &config->gravity);
+        parseConfigValue(line, "fov", &config->fov);
     }
     
     fclose(file);

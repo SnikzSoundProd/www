@@ -20,6 +20,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 
 #define DAY_NIGHT_DURATION_SECONDS (48.0f * 60.0f)
 #define SKY_RADIUS 100.0f
+#define ASSET_TABLE_SIZE 128
 #define WIDTH 1920
 #define HEIGHT 1080
 
@@ -47,6 +48,104 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #define MAX_SHARDS 100
 
 #define PHONE_ANIM_SPEED 8.0f
+
+// Структура для хранения одного ресурса (запись в таблице)
+typedef enum { ASSET_FONT, ASSET_TEXTURE, ASSET_SOUND } AssetType;
+
+typedef struct AssetNode {
+    char* key;
+    void* data;
+    AssetType type;
+    struct AssetNode* next;
+} AssetNode;
+
+// Сам менеджер
+typedef struct {
+    AssetNode* table[ASSET_TABLE_SIZE];
+    SDL_Renderer* renderer_ref;
+} AssetManager;
+
+// Прототипы функций менеджера
+static unsigned long asset_hash(const char* str);
+void AssetManager_Init(AssetManager* am, SDL_Renderer* renderer);
+TTF_Font* AssetManager_GetFont(AssetManager* am, const char* filename, int size);
+void AssetManager_Destroy(AssetManager* am);
+
+// Реализация функций менеджера
+static unsigned long asset_hash(const char* str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++)) {
+        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+    }
+    return hash % ASSET_TABLE_SIZE;
+}
+
+void AssetManager_Init(AssetManager* am, SDL_Renderer* renderer) {
+    for (int i = 0; i < ASSET_TABLE_SIZE; i++) {
+        am->table[i] = NULL;
+    }
+    am->renderer_ref = renderer;
+    printf("Asset Manager initialized.\n");
+}
+
+TTF_Font* AssetManager_GetFont(AssetManager* am, const char* filename, int size) {
+    char key[256];
+    snprintf(key, sizeof(key), "%s_%d", filename, size);
+    unsigned long index = asset_hash(key);
+
+    AssetNode* current = am->table[index];
+    while (current != NULL) {
+        if (strcmp(current->key, key) == 0 && current->type == ASSET_FONT) {
+            return (TTF_Font*)current->data;
+        }
+        current = current->next;
+    }
+
+    TTF_Font* font = TTF_OpenFont(filename, size);
+    if (!font) {
+        printf("Failed to load font: %s. Error: %s\n", filename, TTF_GetError());
+        return NULL;
+    }
+
+    AssetNode* newNode = (AssetNode*)malloc(sizeof(AssetNode));
+    newNode->key = strdup(key);
+    newNode->data = font;
+    newNode->type = ASSET_FONT;
+    newNode->next = am->table[index];
+    am->table[index] = newNode;
+
+    printf("Loaded font '%s' (size %d) via Asset Manager.\n", filename, size);
+    return font;
+}
+
+void AssetManager_Destroy(AssetManager* am) {
+    for (int i = 0; i < ASSET_TABLE_SIZE; i++) {
+        AssetNode* current = am->table[i];
+        while (current != NULL) {
+            AssetNode* next = current->next;
+            
+            switch (current->type) {
+                case ASSET_FONT:
+                    TTF_CloseFont((TTF_Font*)current->data);
+                    break;
+                case ASSET_TEXTURE:
+                    // SDL_DestroyTexture((SDL_Texture*)current->data); // для будущего
+                    break;
+                case ASSET_SOUND:
+                    // Mix_FreeChunk((Mix_Chunk*)current->data); // для будущего
+                    break;
+            }
+
+            printf("Freed asset: %s\n", current->key);
+            free(current->key);
+            free(current);
+      
+            current = next;
+        }
+    }
+    printf("Asset Manager destroyed.\n");
+}
 
 float g_fov = 200.0f;
 
@@ -3464,12 +3563,17 @@ int main(int argc, char* argv[]) {
     SDL_Window* win = SDL_CreateWindow("PS1 Style Pseudo 3D - With Quests Fixed", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
     if (!win) return 1;
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+
+    AssetManager assetManager;
+    AssetManager_Init(&assetManager, ren);
     
-    TTF_Font* font = TTF_OpenFont("arial.ttf", 16);
+    TTF_Font* font = AssetManager_GetFont(&assetManager, "arial.ttf", 16);
     if (!font) {
-        printf("Failed to load font: %s\n", TTF_GetError());
+        printf("Не удалось загрузить основной шрифт, выход.\n");
         return 1;
     }
+    // Можно загрузить еще один, другого размера, если надо
+    TTF_Font* large_font = AssetManager_GetFont(&assetManager, "arial.ttf", 24);
 
     GameplaySettings settings = {
         .mouseSensitivity = 0.003f, .walkSpeed = 0.3f, .runSpeed = 0.5f,
@@ -4039,7 +4143,7 @@ Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
         
         SDL_RenderPresent(ren);
     }
-    TTF_CloseFont(font);
+    AssetManager_Destroy(&assetManager);
     TTF_Quit();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);

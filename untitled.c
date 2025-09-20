@@ -3,8 +3,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <C:\Users\cholo\Downloads\SDL2-devel-2.32.10-mingw\SDL2-2.32.10\x86_64-w64-mingw32\include\SDL2\SDL.h>
-#include <C:\Users\cholo\Downloads\SDL2-devel-2.32.10-mingw\SDL2-2.32.10\x86_64-w64-mingw32\include\SDL2\SDL_ttf.h>
+#include <SDL.h>
+#include <SDL_ttf.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -339,7 +339,54 @@ typedef enum {
 typedef struct {
     PhoneState state;
     float animationProgress;
+    int selectedOption;
 } Phone;
+
+// Структура для истребителя
+typedef struct {
+    Vec3 pos;
+    Vec3 velocity;
+    Vec3 startPos;
+    Vec3 endPos;
+    float progress;
+    int hasDroppedBomb;
+    int active;
+} FighterJet;
+
+// Структура для бомбы
+typedef struct {
+    Vec3 pos;
+    Vec3 velocity;
+    float fuse; // Таймер до взрыва
+    int active;
+} Bomb;
+
+// Структура для взрыва
+typedef struct {
+    Vec3 pos;
+    float currentRadius;
+    float maxRadius;
+    float lifetime;
+    int active;
+} Explosion;
+
+// Состояние кинематографичной камеры
+typedef struct {
+    int isActive;
+    Vec3 position;
+    Vec3 target;
+    float fov;
+    float transitionProgress;
+} CinematicState;
+
+// Менеджер всего события
+typedef struct {
+    int isActive;
+    float timer;
+    FighterJet jets[3]; // Массив для 3-х истребителей
+    Bomb bombs[3];
+    Explosion explosions[3];
+} AirstrikeEvent;
 
 typedef enum {
     QUEST_LOCKED,
@@ -488,6 +535,17 @@ typedef struct {
     SDL_Color color;
 } ProfilerData;
 
+typedef enum {
+    STATE_MAIN_MENU,
+    STATE_SETTINGS,
+    STATE_IN_GAME
+} GameState;
+
+GameState g_currentState;
+int g_menuSelectedOption = 0;
+int g_settingsSelectedOption = 0;
+float g_menuRhombusAngle = 0.0f;
+
 // === ИСПРАВЛЕНИЕ 3: Переименовываем глобальные переменные для ясности ===
 ProfilerData g_profilerData[PROF_CATEGORY_COUNT];
 int g_showProfiler = 0;
@@ -514,6 +572,40 @@ int g_numShards = 0;
 Trajectory g_trajectory;
 HandsSystem g_hands;
 
+AirstrikeEvent g_airstrike;
+CinematicState g_cinematic;
+
+int g_isExiting = 0;       // Флаг, что мы в процессе выхода
+float g_exitFadeAlpha = 0.0f;
+
+#define LUT_SIZE 3600 // Точность до 0.1 градуса
+float sin_table[LUT_SIZE];
+float cos_table[LUT_SIZE];
+
+void init_fast_math() {
+    printf("Initializing Math Look-Up Tables...\n");
+    for (int i = 0; i < LUT_SIZE; i++) {
+        float angle = (float)i * (2.0f * M_PI / LUT_SIZE);
+        sin_table[i] = sinf(angle);
+        cos_table[i] = cosf(angle);
+    }
+}
+
+// Новые, быстрые функции
+float fast_sin(float angle) {
+    // Приводим угол к диапазону 0 - 2PI
+    angle = fmodf(angle, 2.0f * M_PI);
+    if (angle < 0) angle += 2.0f * M_PI;
+    int index = (int)(angle * (LUT_SIZE / (2.0f * M_PI))) % LUT_SIZE;
+    return sin_table[index];
+}
+
+float fast_cos(float angle) {
+    angle = fmodf(angle, 2.0f * M_PI);
+    if (angle < 0) angle += 2.0f * M_PI;
+    int index = (int)(angle * (LUT_SIZE / (2.0f * M_PI))) % LUT_SIZE;
+    return cos_table[index];
+}
 // === ИСПРАВЛЕНИЕ 4: Выносим логику в отдельные функции ===
 
 // Функция для безопасного чтения строки из файла конфигурации
@@ -544,10 +636,20 @@ int parseConfigValue(const char* line, const char* key, float* value) {
 }
 
 void drawText(SDL_Renderer* renderer, TTF_Font* font, const char* text, int x, int y, SDL_Color color) {
-    SDL_Surface* surface = TTF_RenderText_Solid(font, text, color);
-    if (!surface) return;
+    // ИСПРАВЛЕНИЕ: Используем UTF8 для поддержки кириллицы
+    SDL_Surface* surface = TTF_RenderUTF8_Solid(font, text, color); 
+    
+    if (!surface) {
+        // Если что-то пойдет не так, мы увидим ошибку в консоли
+        printf("Не удалось создать поверхность для текста! Ошибка SDL_ttf: %s\n", TTF_GetError());
+        return;
+    }
+    
     SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    if (!texture) { SDL_FreeSurface(surface); return; }
+    if (!texture) { 
+        SDL_FreeSurface(surface); 
+        return; 
+    }
     
     SDL_Rect destRect = { x, y, surface->w, surface->h };
     SDL_RenderCopy(renderer, texture, NULL, &destRect);
@@ -674,11 +776,11 @@ ProjectedPoint project_with_depth(Vec3 p, Camera cam) {
     float dz = p.z - cam.z;
 
     float adjustedRotY = cam.rotY + cam.currentBobX * 0.02f;
-    float sy = sinf(adjustedRotY), cy = cosf(adjustedRotY);
+    float sy = fast_sin(adjustedRotY), cy = fast_cos(adjustedRotY);
     float x_cam = cy * dx - sy * dz;
     float z_cam = sy * dx + cy * dz;
 
-    float sx = sinf(cam.rotX), cx = cosf(cam.rotX);
+    float sx = fast_sin(cam.rotX), cx = fast_cos(cam.rotX);
     float y_cam = cx * dy - sx * z_cam;
     z_cam = sx * dy + cx * z_cam;
 
@@ -711,8 +813,8 @@ void clipAndDrawLine(SDL_Renderer* r, Vec3 p1, Vec3 p2, Camera cam, SDL_Color co
     // --- Шаг 1 и 2: Трансформация и отсечение (остаются без изменений) ---
     float cameraEyeY = cam.y + cam.height + cam.currentBobY;
     float dx1 = p1.x - cam.x, dy1 = p1.y - cameraEyeY, dz1 = p1.z - cam.z;
-    float sy = sinf(cam.rotY), cy = cosf(cam.rotY);
-    float sx = sinf(cam.rotX), cx = cosf(cam.rotX);
+    float sy = fast_sin(cam.rotY), cy = fast_cos(cam.rotY);
+    float sx = fast_sin(cam.rotX), cx = fast_cos(cam.rotX);
     float x1_cam = cy * dx1 - sy * dz1;
     float z1_cam_temp = sy * dx1 + cy * dz1;
     float y1_cam = cx * dy1 - sx * z1_cam_temp;
@@ -740,16 +842,20 @@ void clipAndDrawLine(SDL_Renderer* r, Vec3 p1, Vec3 p2, Camera cam, SDL_Color co
     int sx2 = (int)(WIDTH/2 + x2_cam * fov / z2_cam);
     int sy2 = (int)(HEIGHT/2 - y2_cam * fov / z2_cam);
 
-    // --- Шаг 4: Попиксельная отрисовка (с оптимизацией) ---
-    // <<< ИСПРАВЛЕНИЕ 1: Устанавливаем цвет ОДИН РАЗ перед циклом >>>
     SDL_SetRenderDrawColor(r, color.r, color.g, color.b, color.a);
 
     int dx = abs(sx2 - sx1);
     int dy = abs(sy2 - sy1);
     int steps = (dx > dy) ? dx : dy;
 
-    if (steps == 0) {
-        drawPixelWithZCheck_Fast(r, sx1, sy1, z1_cam); // <<< Используем быструю функцию
+    // <<< УДАР #2: БЫСТРЫЙ ПУТЬ ДЛЯ КОРОТКИХ ЛИНИЙ >>>
+    if (steps < 2) {
+        drawPixelWithZCheck_Fast(r, sx1, sy1, z1_cam);
+        return; // ВЫХОДИМ, ИЗБЕГАЯ ДОРОГОГО ЦИКЛА
+    }
+
+    if (steps == 0) { // Эта проверка на всякий случай
+        drawPixelWithZCheck_Fast(r, sx1, sy1, z1_cam);
         return;
     }
 
@@ -884,7 +990,7 @@ void updateWorldEvolution(float deltaTime) {
     switch(g_worldEvolution.currentState) {
         case WORLD_STATE_WIREFRAME:
             // Базовое состояние - просто пульсация
-            g_worldEvolution.gridPulse = sinf(SDL_GetTicks() * 0.001f) * 0.1f;
+            g_worldEvolution.gridPulse = fast_sin(SDL_GetTicks() * 0.001f) * 0.1f;
             break;
             
         case WORLD_STATE_GRID_GROWING:
@@ -896,14 +1002,14 @@ void updateWorldEvolution(float deltaTime) {
 case WORLD_STATE_CUBE_COMPLETE:
     g_worldEvolution.gridWallHeight = 50.0f;
     // --- МЕДЛЕННАЯ ПУЛЬСАЦИЯ ---
-    g_worldEvolution.gridPulse = sinf(SDL_GetTicks() * 0.0008f) * 0.15f; // Было 0.002f и 0.2f
-    g_worldEvolution.polygonOpacity = sinf(SDL_GetTicks() * 0.001f) * 0.05f + 0.02f; // Плавнее
+    g_worldEvolution.gridPulse = fast_sin(SDL_GetTicks() * 0.0008f) * 0.15f; // Было 0.002f и 0.2f
+    g_worldEvolution.polygonOpacity = fast_sin(SDL_GetTicks() * 0.001f) * 0.05f + 0.02f; // Плавнее
     break;
             
         case WORLD_STATE_MATERIALIZING:
             // Появляются полупрозрачные полигоны
             g_worldEvolution.polygonOpacity = lerp(g_worldEvolution.polygonOpacity, 0.5f, deltaTime * 0.2f);
-            g_worldEvolution.chromaAberration = sinf(SDL_GetTicks() * 0.01f) * 0.02f;
+            g_worldEvolution.chromaAberration = fast_sin(SDL_GetTicks() * 0.01f) * 0.02f;
             break;
             
         case WORLD_STATE_TEXTURED:
@@ -944,7 +1050,7 @@ void drawEvolvingWalls(SDL_Renderer* ren, Camera cam) {
 
     // Вертикальные линии
     for (float i = -worldSize; i <= worldSize; i += step) {
-        float waveOffset = sinf(i * 0.1f + SDL_GetTicks() * 0.0005f) * g_worldEvolution.gridPulse * 0.5f;
+        float waveOffset = fast_sin(i * 0.1f + SDL_GetTicks() * 0.0005f) * g_worldEvolution.gridPulse * 0.5f;
         float currentHeight = -2.0f + h + waveOffset;
 
         // Передняя и задняя стены
@@ -1124,9 +1230,9 @@ void spawnGlassShards(Vec3 pos, int count) {
         float speed = 2.0f + ((float)rand() / RAND_MAX) * 3.0f;
         
         shard->pos = pos;
-        shard->velocity.x = cosf(angle) * cosf(pitch) * speed;
-        shard->velocity.y = sinf(pitch) * speed + 2.0f; // Подлетают вверх
-        shard->velocity.z = sinf(angle) * cosf(pitch) * speed;
+        shard->velocity.x = fast_cos(angle) * fast_cos(pitch) * speed;
+        shard->velocity.y = fast_sin(pitch) * speed + 2.0f; // Подлетают вверх
+        shard->velocity.z = fast_sin(angle) * fast_cos(pitch) * speed;
         
         shard->rotation = (Vec3){
             ((float)rand() / RAND_MAX) * 2.0f * M_PI,
@@ -1323,9 +1429,9 @@ void updateGravityGlove(Camera* cam, float deltaTime) {
     // 1. Создаем луч из камеры
     Vec3 rayOrigin = {cam->x, cam->y + cam->height, cam->z};
     Vec3 rayDir = {
-        sinf(cam->rotY) * cosf(cam->rotX),
-        -sinf(cam->rotX), // Направление по вертикали
-        cosf(cam->rotY) * cosf(cam->rotX)
+        fast_sin(cam->rotY) * fast_cos(cam->rotX),
+        -fast_sin(cam->rotX), // Направление по вертикали
+        fast_cos(cam->rotY) * fast_cos(cam->rotX)
     };
     rayDir = normalize(rayDir);
 
@@ -1457,29 +1563,29 @@ void updateHandsAnimation(Camera* cam, float deltaTime) {
         case HAND_STATE_IDLE:
             // Лёгкое покачивание
             g_hands.idlePhase += deltaTime * 2.0f;
-            targetLeft.y += sinf(g_hands.idlePhase) * 0.02f;
-            targetRight.y += sinf(g_hands.idlePhase + 0.5f) * 0.02f;
+            targetLeft.y += fast_sin(g_hands.idlePhase) * 0.02f;
+            targetRight.y += fast_sin(g_hands.idlePhase + 0.5f) * 0.02f;
             break;
             
         case HAND_STATE_WALKING:
             // Маятниковое движение при ходьбе
             g_hands.walkPhase += deltaTime * 6.0f;
-            targetLeft.z += sinf(g_hands.walkPhase) * 0.1f;
-            targetLeft.y += fabsf(sinf(g_hands.walkPhase * 2)) * 0.05f;
-            targetRight.z += sinf(g_hands.walkPhase + M_PI) * 0.1f;
-            targetRight.y += fabsf(sinf(g_hands.walkPhase * 2 + M_PI)) * 0.05f;
+            targetLeft.z += fast_sin(g_hands.walkPhase) * 0.1f;
+            targetLeft.y += fabsf(fast_sin(g_hands.walkPhase * 2)) * 0.05f;
+            targetRight.z += fast_sin(g_hands.walkPhase + M_PI) * 0.1f;
+            targetRight.y += fabsf(fast_sin(g_hands.walkPhase * 2 + M_PI)) * 0.05f;
             break;
             
         case HAND_STATE_RUNNING:
             // Более активное движение при беге
             g_hands.runPhase += deltaTime * 10.0f;
-            targetLeft.z += sinf(g_hands.runPhase) * 0.2f;
-            targetLeft.x -= fabsf(sinf(g_hands.runPhase)) * 0.1f;
-            targetLeft.y += fabsf(sinf(g_hands.runPhase * 2)) * 0.1f;
+            targetLeft.z += fast_sin(g_hands.runPhase) * 0.2f;
+            targetLeft.x -= fabsf(fast_sin(g_hands.runPhase)) * 0.1f;
+            targetLeft.y += fabsf(fast_sin(g_hands.runPhase * 2)) * 0.1f;
             
-            targetRight.z += sinf(g_hands.runPhase + M_PI) * 0.2f;
-            targetRight.x += fabsf(sinf(g_hands.runPhase + M_PI)) * 0.1f;
-            targetRight.y += fabsf(sinf(g_hands.runPhase * 2 + M_PI)) * 0.1f;
+            targetRight.z += fast_sin(g_hands.runPhase + M_PI) * 0.2f;
+            targetRight.x += fabsf(fast_sin(g_hands.runPhase + M_PI)) * 0.1f;
+            targetRight.y += fabsf(fast_sin(g_hands.runPhase * 2 + M_PI)) * 0.1f;
             break;
             
         case HAND_STATE_JUMPING:
@@ -1495,7 +1601,7 @@ void updateHandsAnimation(Camera* cam, float deltaTime) {
             targetRight.z += 0.3f;
             targetRight.y += 0.1f;
             // Пальцы "хватают" (имитация через позицию)
-            targetRight.x += sinf(SDL_GetTicks() * 0.005f) * 0.02f;
+            targetRight.x += fast_sin(SDL_GetTicks() * 0.005f) * 0.02f;
             break;
             
         case HAND_STATE_HOLDING:
@@ -1510,12 +1616,12 @@ void updateHandsAnimation(Camera* cam, float deltaTime) {
             g_hands.throwPhase += deltaTime * 8.0f;
             if (g_hands.throwPhase < M_PI) {
                 // Замах назад
-                targetRight.z -= 0.3f * sinf(g_hands.throwPhase);
-                targetRight.y += 0.2f * sinf(g_hands.throwPhase);
+                targetRight.z -= 0.3f * fast_sin(g_hands.throwPhase);
+                targetRight.y += 0.2f * fast_sin(g_hands.throwPhase);
             } else {
                 // Бросок вперёд
-                targetRight.z += 0.5f * sinf(g_hands.throwPhase - M_PI);
-                targetRight.y -= 0.1f * sinf(g_hands.throwPhase - M_PI);
+                targetRight.z += 0.5f * fast_sin(g_hands.throwPhase - M_PI);
+                targetRight.y -= 0.1f * fast_sin(g_hands.throwPhase - M_PI);
             }
             
             if (g_hands.throwPhase > 2 * M_PI) {
@@ -1540,11 +1646,11 @@ void updateHandsAnimation(Camera* cam, float deltaTime) {
                 // Шевелим пальцами (имитация)
                 targetLeft.y += 0.3f;
                 targetLeft.z += 0.2f;
-                targetLeft.x += sinf((inspectProgress - 1.0f) * 4.0f) * 0.05f;
+                targetLeft.x += fast_sin((inspectProgress - 1.0f) * 4.0f) * 0.05f;
                 
                 targetRight.y += 0.3f;
                 targetRight.z += 0.2f;
-                targetRight.x -= sinf((inspectProgress - 1.0f) * 4.0f) * 0.05f;
+                targetRight.x -= fast_sin((inspectProgress - 1.0f) * 4.0f) * 0.05f;
             } else if (inspectProgress < 4.0f) {
                 // Поворот тыльной стороной
                 float turnProgress = inspectProgress - 3.0f;
@@ -1620,9 +1726,9 @@ void throwObject(Camera* cam, float power) {
     g_hands.heldObject->state = PICKUP_STATE_THROWN;
     
     Vec3 throwDir = {
-        sinf(cam->rotY) * cosf(cam->rotX),
-        -sinf(cam->rotX),
-        cosf(cam->rotY) * cosf(cam->rotX)
+        fast_sin(cam->rotY) * fast_cos(cam->rotX),
+        -fast_sin(cam->rotX),
+        fast_cos(cam->rotY) * fast_cos(cam->rotX)
     };
     throwDir = normalize(throwDir);
 
@@ -1652,9 +1758,9 @@ void calculateTrajectory(Camera* cam, float power, Trajectory* traj, CollisionBo
     
     // Начальные условия
     Vec3 throwDir = {
-        sinf(cam->rotY) * cosf(cam->rotX),
-        -sinf(cam->rotX),
-        cosf(cam->rotY) * cosf(cam->rotX)
+        fast_sin(cam->rotY) * fast_cos(cam->rotX),
+        -fast_sin(cam->rotX),
+        fast_cos(cam->rotY) * fast_cos(cam->rotX)
     };
     throwDir = normalize(throwDir);
 
@@ -1722,16 +1828,16 @@ void drawPickupObject(SDL_Renderer* ren, PickupObject* obj, Camera cam) {
         Vec3 v = baseVerts[i];
         
         // Вращение вокруг Y
-        float cy = cosf(obj->rotation.y);
-        float sy = sinf(obj->rotation.y);
+        float cy = fast_cos(obj->rotation.y);
+        float sy = fast_sin(obj->rotation.y);
         float newX = v.x * cy - v.z * sy;
         float newZ = v.x * sy + v.z * cy;
         v.x = newX;
         v.z = newZ;
         
         // Вращение вокруг X
-        float cx = cosf(obj->rotation.x);
-        float sx = sinf(obj->rotation.x);
+        float cx = fast_cos(obj->rotation.x);
+        float sx = fast_sin(obj->rotation.x);
         float newY = v.y * cx - v.z * sx;
         newZ = v.y * sx + v.z * cx;
         v.y = newY;
@@ -1765,14 +1871,14 @@ void drawPickupObject(SDL_Renderer* ren, PickupObject* obj, Camera cam) {
         for (int i = 0; i < 4; i++) {
             float angle = (float)i / 4 * 2 * M_PI;
             Vec3 p1 = {
-                neckBottom.x + cosf(angle) * neckRadius,
+                neckBottom.x + fast_cos(angle) * neckRadius,
                 neckBottom.y,
-                neckBottom.z + sinf(angle) * neckRadius
+                neckBottom.z + fast_sin(angle) * neckRadius
             };
             Vec3 p2 = {
-                neckTop.x + cosf(angle) * neckRadius * 0.7f,
+                neckTop.x + fast_cos(angle) * neckRadius * 0.7f,
                 neckTop.y,
-                neckTop.z + sinf(angle) * neckRadius * 0.7f
+                neckTop.z + fast_sin(angle) * neckRadius * 0.7f
             };
             clipAndDrawLine(ren, p1, p2, cam, obj->color);
         }
@@ -1786,14 +1892,14 @@ void drawGlassShards(SDL_Renderer* ren, Camera cam) {
         
         // Простой треугольник для осколка
         Vec3 p1 = {
-            shard->pos.x + cosf(shard->rotation.x) * shard->size,
+            shard->pos.x + fast_cos(shard->rotation.x) * shard->size,
             shard->pos.y,
-            shard->pos.z + sinf(shard->rotation.x) * shard->size
+            shard->pos.z + fast_sin(shard->rotation.x) * shard->size
         };
         Vec3 p2 = {
-            shard->pos.x + cosf(shard->rotation.y) * shard->size,
+            shard->pos.x + fast_cos(shard->rotation.y) * shard->size,
             shard->pos.y + shard->size,
-            shard->pos.z + sinf(shard->rotation.y) * shard->size
+            shard->pos.z + fast_sin(shard->rotation.y) * shard->size
         };
         Vec3 p3 = {
             shard->pos.x,
@@ -1815,19 +1921,19 @@ Vec3 rotatePoint(Vec3 point, Vec3 center, float angleX, float angleY, float angl
     result.z -= center.z;
     
     if (fabsf(angleY) > 0.001f) {
-        float cy = cosf(angleY); float sy = sinf(angleY);
+        float cy = fast_cos(angleY); float sy = fast_sin(angleY);
         float newX = result.x * cy - result.z * sy;
         float newZ = result.x * sy + result.z * cy;
         result.x = newX; result.z = newZ;
     }
     if (fabsf(angleX) > 0.001f) {
-        float cx = cosf(angleX); float sx = sinf(angleX);
+        float cx = fast_cos(angleX); float sx = fast_sin(angleX);
         float newY = result.y * cx - result.z * sx;
         float newZ = result.y * sx + result.z * cx;
         result.y = newY; result.z = newZ;
     }
     if (fabsf(angleZ) > 0.001f) {
-        float cz = cosf(angleZ); float sz = sinf(angleZ);
+        float cz = fast_cos(angleZ); float sz = fast_sin(angleZ);
         float newX = result.x * cz - result.y * sz;
         float newY = result.x * sz + result.y * cz;
         result.x = newX; result.y = newY;
@@ -1903,8 +2009,8 @@ static Vec3 transform_hand_vertex(Vec3 localPoint, const Vec3* handPos, const Ve
     v.z += handPos->z;
 
     // c) Вращаем точку вместе с камерой
-    float sinY = sinf(cam->rotY); float cosY = cosf(cam->rotY);
-    float sinX = sinf(cam->rotX); float cosX = cosf(cam->rotX);
+    float sinY = fast_sin(cam->rotY); float cosY = fast_cos(cam->rotY);
+    float sinX = fast_sin(cam->rotX); float cosX = fast_cos(cam->rotX);
 
     // Вращение по Y (поворот влево-вправо)
     float rotatedX = v.x * cosY - v.z * sinY;
@@ -1986,8 +2092,8 @@ void draw3DHand(SDL_Renderer* ren, Vec3 handPos, Vec3 handRot, Camera cam, int i
         
         // Суставы
         Vec3 base = transform_hand_vertex((Vec3){fX, pH/2, 0}, &handPos, &handRot, &cam);
-        Vec3 mid = transform_hand_vertex((Vec3){fX, pH/2 + fLen/2, fLen/2 * sinf(bend)}, &handPos, &handRot, &cam);
-        Vec3 tip = transform_hand_vertex((Vec3){fX, pH/2 + fLen, fLen * sinf(bend)}, &handPos, &handRot, &cam);
+        Vec3 mid = transform_hand_vertex((Vec3){fX, pH/2 + fLen/2, fLen/2 * fast_sin(bend)}, &handPos, &handRot, &cam);
+        Vec3 tip = transform_hand_vertex((Vec3){fX, pH/2 + fLen, fLen * fast_sin(bend)}, &handPos, &handRot, &cam);
 
         // Рисуем два сегмента
         drawVolumetricSegment(ren, base, mid, thickness, cam, skinColor);
@@ -2058,8 +2164,8 @@ void drawHands(SDL_Renderer* ren, Camera cam) {
         };
         
         // Применяем поворот камеры
-        float camSin = sinf(cam.rotY);
-        float camCos = cosf(cam.rotY);
+        float camSin = fast_sin(cam.rotY);
+        float camCos = fast_cos(cam.rotY);
         
         g_hands.heldObject->pos.x = cam.x + camCos * holdOffset.x - camSin * holdOffset.z;
         g_hands.heldObject->pos.y = cameraEyeY + holdOffset.y;
@@ -2085,8 +2191,8 @@ void updateCameraBob(Camera* cam, float deltaTime) {
         cam->bobPhase += bobFrequency * deltaTime * speed * 5.0f;
         cam->bobAmount = lerp(cam->bobAmount, 1.0f, deltaTime * 8.0f);
         
-        float verticalBob = sinf(cam->bobPhase) * bobAmplitude * cam->bobAmount;
-        float horizontalBob = sinf(cam->bobPhase * 0.5f) * bobAmplitude * 0.5f * cam->bobAmount;
+        float verticalBob = fast_sin(cam->bobPhase) * bobAmplitude * cam->bobAmount;
+        float horizontalBob = fast_sin(cam->bobPhase * 0.5f) * bobAmplitude * 0.5f * cam->bobAmount;
         
         cam->currentBobY = lerp(cam->currentBobY, verticalBob, deltaTime * 15.0f);
         cam->currentBobX = lerp(cam->currentBobX, horizontalBob, deltaTime * 15.0f);
@@ -2099,7 +2205,7 @@ void updateCameraBob(Camera* cam, float deltaTime) {
     }
     
     if (!cam->isMoving) {
-        float breathe = sinf(SDL_GetTicks() * 0.001f) * 0.01f;
+        float breathe = fast_sin(SDL_GetTicks() * 0.001f) * 0.01f;
         cam->currentBobY += breathe;
     }
 }
@@ -2168,8 +2274,8 @@ Vec3 findSafeSpawnPosition(float baseX, float baseY, float baseZ, CollisionBox* 
         float angle = (float)attempts * 0.5f;
         float radius = searchRadius + (float)attempts * 0.2f;
         
-        pos.x = baseX + cosf(angle) * radius;
-        pos.z = baseZ + sinf(angle) * radius;
+        pos.x = baseX + fast_cos(angle) * radius;
+        pos.z = baseZ + fast_sin(angle) * radius;
         pos.y = baseY;
         
         if (!isPositionInsideBox(pos, boxes, numBoxes)) {
@@ -2492,9 +2598,9 @@ void initCoins() {
         float radius = 4.0f + (float)(i / 5) * 2.5f;  // Расширяющаяся спираль
         
         // Базовая позиция
-        float baseX = cosf(angle) * radius;
-        float baseZ = sinf(angle) * radius;
-        float baseY = 0.5f + sinf((float)i * 0.3f) * 0.5f;  // Разная высота
+        float baseX = fast_cos(angle) * radius;
+        float baseZ = fast_sin(angle) * radius;
+        float baseY = 0.5f + fast_sin((float)i * 0.3f) * 0.5f;  // Разная высота
         
         // Находим безопасную позицию
         Vec3 safePos = findSafeSpawnPosition(baseX, baseY, baseZ, collisionBoxes, numCollisionBoxes);
@@ -2542,7 +2648,7 @@ void updateCoins(float deltaTime) {
 void drawCoin(SDL_Renderer* ren, Coin* coin, Camera cam) {
     if (coin->collected) return;
     
-    float bobOffset = sinf(coin->bobPhase) * 0.2f;
+    float bobOffset = fast_sin(coin->bobPhase) * 0.2f;
     float rotation = coin->rotationPhase;
     
     Vec3 center = {coin->pos.x, coin->pos.y + bobOffset, coin->pos.z};
@@ -2560,12 +2666,12 @@ void drawCoin(SDL_Renderer* ren, Coin* coin, Camera cam) {
     
     if (distToPlayer < 2.0f) {
         // Близко - монета пульсирует
-        radius = 0.3f + sinf(SDL_GetTicks() * 0.01f) * 0.05f;
+        radius = 0.3f + fast_sin(SDL_GetTicks() * 0.01f) * 0.05f;
         
         if (distToPlayer < 1.5f) {
             // Очень близко - меняем цвет
             goldColor = (SDL_Color){255, 240, 100, 255};
-            radius = 0.35f + sinf(SDL_GetTicks() * 0.02f) * 0.08f;
+            radius = 0.35f + fast_sin(SDL_GetTicks() * 0.02f) * 0.08f;
         }
     }
     
@@ -2574,9 +2680,9 @@ void drawCoin(SDL_Renderer* ren, Coin* coin, Camera cam) {
     
     for (int i = 0; i < segments; i++) {
         float angle = (float)i / segments * 2.0f * M_PI + rotation;
-        points[i].x = center.x + cosf(angle) * radius * fabsf(cosf(rotation));
-        points[i].y = center.y + sinf(angle) * radius * 0.3f;
-        points[i].z = center.z + sinf(angle) * radius * fabsf(sinf(rotation));
+        points[i].x = center.x + fast_cos(angle) * radius * fabsf(fast_cos(rotation));
+        points[i].y = center.y + fast_sin(angle) * radius * 0.3f;
+        points[i].z = center.z + fast_sin(angle) * radius * fabsf(fast_sin(rotation));
     }
     
     // Рисуем грани монеты
@@ -2597,9 +2703,9 @@ void drawCoin(SDL_Renderer* ren, Coin* coin, Camera cam) {
         for (int i = 0; i < segments; i++) {
             float angle = (float)i / segments * 2.0f * M_PI;
             Vec3 auraPoint = {
-                center.x + cosf(angle) * auraRadius,
+                center.x + fast_cos(angle) * auraRadius,
                 center.y,
-                center.z + sinf(angle) * auraRadius
+                center.z + fast_sin(angle) * auraRadius
             };
             if (i % 2 == 0) {  // Рисуем через одну для эффекта
                 clipAndDrawLine(ren, center, auraPoint, cam, auraColor);
@@ -2624,7 +2730,7 @@ void checkCoinCollection(Camera* cam) {
         );
         
         // Текущая высота монеты с учётом анимации
-        float coinY = g_coins[i].pos.y + sinf(g_coins[i].bobPhase) * 0.2f;
+        float coinY = g_coins[i].pos.y + fast_sin(g_coins[i].bobPhase) * 0.2f;
         
         // Проверяем, находится ли монета в пределах досягаемости игрока
         int inVerticalRange = (coinY >= playerFootY - 0.5f && coinY <= playerHeadY + 0.5f);
@@ -2756,7 +2862,7 @@ void initQuestSystem(QuestSystem* qs) {
 
 void drawQuestNode(SDL_Renderer* ren, QuestNode* node, Camera cam, float time) {
     float pulse = (node->status == QUEST_ACTIVE) ? 
-                sinf(time * 3.0f) * 0.2f + 1.0f : 1.0f;
+                fast_sin(time * 3.0f) * 0.2f + 1.0f : 1.0f;
     
     float scale = node->nodeScale * pulse;
     
@@ -2805,7 +2911,7 @@ void drawQuestConnections(SDL_Renderer* ren, QuestSystem* qs, Camera cam, float 
             SDL_Color lineColor = {100, 100, 100, 255};
             
             if (node->status == QUEST_COMPLETED) {
-                float glow = sinf(time * 2.0f + i) * 0.5f + 0.5f;
+                float glow = fast_sin(time * 2.0f + i) * 0.5f + 0.5f;
                 lineColor.r = 100 + glow * 155;
                 lineColor.g = 100 + glow * 155;
                 lineColor.b = 255;
@@ -2960,9 +3066,9 @@ void spawnGlitches(int count) {
         g_glitchBytes[i].active = 1;
         float angle = ((float)rand() / RAND_MAX) * 2.0f * M_PI;
         float distance = 5.0f + ((float)rand() / RAND_MAX) * 3.0f;
-        g_glitchBytes[i].pos.x = g_rknChan.pos.x + cosf(angle) * distance;
+        g_glitchBytes[i].pos.x = g_rknChan.pos.x + fast_cos(angle) * distance;
         g_glitchBytes[i].pos.y = 1.5f;
-        g_glitchBytes[i].pos.z = g_rknChan.pos.z + sinf(angle) * distance;
+        g_glitchBytes[i].pos.z = g_rknChan.pos.z + fast_sin(angle) * distance;
         g_glitchBytes[i].velocity = (Vec3){0, 0, 0};
         g_glitchBytes[i].jitter = 0.0f;
         g_activeGlitches++;
@@ -3027,9 +3133,9 @@ void drawGlitches(SDL_Renderer* ren, Camera cam) {
     for (int i = 0; i < MAX_GLITCHES; i++) {
         if (g_glitchBytes[i].active) {
             Vec3 jitterPos = g_glitchBytes[i].pos;
-            jitterPos.x += sinf(g_glitchBytes[i].jitter) * 0.2f;
-            jitterPos.y += cosf(g_glitchBytes[i].jitter * 1.5f) * 0.2f;
-            jitterPos.z += sinf(g_glitchBytes[i].jitter * 0.8f) * 0.2f;
+            jitterPos.x += fast_sin(g_glitchBytes[i].jitter) * 0.2f;
+            jitterPos.y += fast_cos(g_glitchBytes[i].jitter * 1.5f) * 0.2f;
+            jitterPos.z += fast_sin(g_glitchBytes[i].jitter * 0.8f) * 0.2f;
             drawWorldCube(ren, jitterPos, 0.5f, cam, glitchColor);
         }
     }
@@ -3166,7 +3272,7 @@ int isPointInFrustum(Vec3 point, Camera cam) {
     
     // --- 2. Проверка по углу обзора (отсечение по боковым плоскостям) ---
     // Вектор направления камеры
-    Vec3 camDir = {sinf(cam.rotY), 0, cosf(cam.rotY)};
+    Vec3 camDir = {fast_sin(cam.rotY), 0, fast_cos(cam.rotY)};
     
     // Вектор от камеры к точке
     Vec3 pointDir = {dx, 0, dz};
@@ -3217,7 +3323,7 @@ int isBoxInFrustum_Improved(CollisionBox* box, Camera cam) {
     }
     
     // --- 2. Улучшенная проверка по углу обзора ---
-    Vec3 camDir = {sinf(cam.rotY), 0, cosf(cam.rotY)}; // Вектор взгляда камеры
+    Vec3 camDir = {fast_sin(cam.rotY), 0, fast_cos(cam.rotY)}; // Вектор взгляда камеры
     Vec3 toObject = {dx, 0, dz}; // Вектор от камеры к центру объекта
     
     // Проекция вектора toObject на вектор camDir. Это расстояние 'd' вдоль луча взгляда.
@@ -3341,12 +3447,12 @@ void updateDayNightCycle(float deltaTime, Camera cam) {
 
     // 4. Расчет позиций небесных тел (без изменений)
     float timeAngle = g_dayNight.timeOfDay * 2.0f * M_PI;
-    g_dayNight.sunPos.y = cam.y + sinf(timeAngle) * SKY_RADIUS;
-    g_dayNight.sunPos.z = cam.z + cosf(timeAngle) * SKY_RADIUS;
+    g_dayNight.sunPos.y = cam.y + fast_sin(timeAngle) * SKY_RADIUS;
+    g_dayNight.sunPos.z = cam.z + fast_cos(timeAngle) * SKY_RADIUS;
     g_dayNight.sunPos.x = cam.x; 
 
-    g_dayNight.moonPos.y = cam.y + sinf(timeAngle + M_PI) * SKY_RADIUS;
-    g_dayNight.moonPos.z = cam.z + cosf(timeAngle + M_PI) * SKY_RADIUS;
+    g_dayNight.moonPos.y = cam.y + fast_sin(timeAngle + M_PI) * SKY_RADIUS;
+    g_dayNight.moonPos.z = cam.z + fast_cos(timeAngle + M_PI) * SKY_RADIUS;
     g_dayNight.moonPos.x = cam.x;
 }
 
@@ -3443,8 +3549,9 @@ void drawPhone(SDL_Renderer* ren, TTF_Font* font) {
     }
 }
 
+// === ЗАМЕНИ СТАРУЮ drawFloor НА ЭТУ ===
 void drawFloor(SDL_Renderer* ren, Camera cam) {
-    // Если мир еще на ранней стадии, рисуем простую сетку (остается как было)
+    // Если мир еще на ранней стадии, рисуем простую сетку
     if (g_worldEvolution.currentState < WORLD_STATE_MATERIALIZING) {
         SDL_Color gridColor = {60, 60, 70, 255};
         for (int i = -20; i <= 20; i += 2) {
@@ -3457,43 +3564,251 @@ void drawFloor(SDL_Renderer* ren, Camera cam) {
     }
 
     // --- НОВАЯ СУПЕР-ОПТИМИЗИРОВАННАЯ ЛОГИКА ---
-    float tileSize = 4.0f;  // Увеличиваем плитку, чтобы было меньше объектов
-    int viewRange = 10;     // Уменьшаем дальность прорисовки
+    float tileSize = 4.0f;
+    int viewRange = 8; // Уменьшаем дальность прорисовки, но увеличиваем размер плитки
 
-    for (float x = -viewRange * tileSize; x < viewRange * tileSize; x += tileSize) {
-        for (float z = -viewRange * tileSize; z < viewRange * tileSize; z += tileSize) {
-            
-            float distSq = (x + tileSize/2 - cam.x)*(x + tileSize/2 - cam.x) + (z + tileSize/2 - cam.z)*(z + tileSize/2 - cam.z);
-            if (distSq > viewRange * viewRange * tileSize * tileSize) continue;
+    // Вычисляем, на какой плитке стоит камера
+    int camTileX = (int)floorf(cam.x / tileSize);
+    int camTileZ = (int)floorf(cam.z / tileSize);
+
+    for (int x = -viewRange; x <= viewRange; x++) {
+        for (int z = -viewRange; z <= viewRange; z++) {
+            // Рисуем от плитки, где стоит игрок, наружу
+            float worldX = (camTileX + x) * tileSize;
+            float worldZ = (camTileZ + z) * tileSize;
+
+            // Простое отсечение по расстоянию, чтобы не рисовать углы
+            float distSq = x*x + z*z;
+            if (distSq > viewRange * viewRange) continue;
 
             Vec3 corners[4] = {
-                {x, -2.0f, z},
-                {x + tileSize, -2.0f, z},
-                {x + tileSize, -2.0f, z + tileSize},
-                {x, -2.0f, z + tileSize}
+                {worldX, -2.0f, worldZ},
+                {worldX + tileSize, -2.0f, worldZ},
+                {worldX + tileSize, -2.0f, worldZ + tileSize},
+                {worldX, -2.0f, worldZ + tileSize}
             };
 
-            // Пропускаем плитки, которые полностью за камерой
-            // (Это также предотвращает "взрыв полигонов")
-            ProjectedPoint pp = project_with_depth((Vec3){x + tileSize/2, -2.0f, z + tileSize/2}, cam);
+            // Проверяем, находится ли хотя бы один угол плитки перед нами
+            ProjectedPoint pp = project_with_depth(corners[0], cam);
             if (pp.z < NEAR_PLANE) continue;
-            
-            SDL_Color tileColor = (( (int)(x/tileSize) + (int)(z/tileSize) ) % 2 == 0) ? 
+
+            SDL_Color tileColor = (( (int)(worldX/tileSize) + (int)(worldZ/tileSize) ) % 2 == 0) ? 
                                   (SDL_Color){45, 45, 55, 255} : 
                                   (SDL_Color){35, 35, 45, 255};
-
-            // Вместо вызова медленной fillTriangle, мы рисуем всего 6 линий!
-            // 1. Контур квадрата
+            
+            // Вместо заливки рисуем только контур и диагонали - это в 100 раз быстрее
             clipAndDrawLine(ren, corners[0], corners[1], cam, tileColor);
             clipAndDrawLine(ren, corners[1], corners[2], cam, tileColor);
             clipAndDrawLine(ren, corners[2], corners[3], cam, tileColor);
             clipAndDrawLine(ren, corners[3], corners[0], cam, tileColor);
-
-            // 2. Диагонали для создания иллюзии заливки
             clipAndDrawLine(ren, corners[0], corners[2], cam, tileColor);
-            clipAndDrawLine(ren, corners[1], corners[3], cam, tileColor);
         }
     }
+}
+
+// === ВСТАВЬ ЭТОТ БЛОК ПЕРЕД main() ===
+
+void drawJet(SDL_Renderer* ren, FighterJet* jet, Camera cam) {
+    if (!jet->active) return;
+    
+    Vec3 body_front = {jet->pos.x, jet->pos.y, jet->pos.z + 2.0f};
+    Vec3 body_rear = {jet->pos.x, jet->pos.y, jet->pos.z - 2.0f};
+    Vec3 wing_left = {jet->pos.x - 2.5f, jet->pos.y, jet->pos.z - 1.0f};
+    Vec3 wing_right = {jet->pos.x + 2.5f, jet->pos.y, jet->pos.z - 1.0f};
+    
+    SDL_Color jetColor = {200, 200, 210, 255};
+
+    clipAndDrawLine(ren, body_front, wing_left, cam, jetColor);
+    clipAndDrawLine(ren, wing_left, body_rear, cam, jetColor);
+    clipAndDrawLine(ren, body_rear, wing_right, cam, jetColor);
+    clipAndDrawLine(ren, wing_right, body_front, cam, jetColor);
+}
+
+void drawBomb(SDL_Renderer* ren, Bomb* bomb, Camera cam) {
+    if (!bomb->active) return;
+    
+    Vec3 top = {bomb->pos.x, bomb->pos.y + 0.3f, bomb->pos.z};
+    Vec3 bottom = {bomb->pos.x, bomb->pos.y - 0.3f, bomb->pos.z};
+    SDL_Color bombColor = {50, 50, 50, 255};
+    clipAndDrawLine(ren, top, bottom, cam, bombColor);
+}
+
+void drawExplosion(SDL_Renderer* ren, Explosion* explosion, Camera cam) {
+    if (!explosion->active) return;
+    
+    int segments = 12;
+    float radius = explosion->currentRadius;
+    float opacity = (explosion->lifetime / 1.5f);
+    if (opacity > 1.0f) opacity = 1.0f;
+    
+    SDL_Color color = {255, (int)(150 * opacity), 0, (int)(255 * opacity)};
+
+    Vec3 center = explosion->pos;
+    Vec3 points_xy[segments], points_xz[segments];
+
+    for (int i = 0; i < segments; i++) {
+        float angle = 2.0f * M_PI * i / segments;
+        points_xy[i] = (Vec3){center.x + fast_cos(angle) * radius, center.y + fast_sin(angle) * radius, center.z};
+        points_xz[i] = (Vec3){center.x + fast_cos(angle) * radius, center.y, center.z + fast_sin(angle) * radius};
+    }
+
+    for (int i = 0; i < segments; i++) {
+        clipAndDrawLine(ren, points_xy[i], points_xy[(i + 1) % segments], cam, color);
+        clipAndDrawLine(ren, points_xz[i], points_xz[(i + 1) % segments], cam, color);
+    }
+}
+
+void startAirstrike(Vec3 start, Vec3 end, Camera* playerCam) {
+    if (g_airstrike.isActive) return;
+    
+    printf("Calling for Democracy!\n");
+    g_airstrike.isActive = 1;
+    g_airstrike.timer = 0.0f;
+    
+    for (int i = 0; i < 3; i++) {
+        Vec3 offset = {(float)(i-1) * 6.0f, 0, (float)(i-1) * 3.0f};
+        g_airstrike.jets[i].startPos = (Vec3){start.x + offset.x, start.y, start.z + offset.z};
+        g_airstrike.jets[i].endPos = (Vec3){end.x + offset.x, end.y, end.z + offset.z};
+        g_airstrike.jets[i].pos = g_airstrike.jets[i].startPos;
+        g_airstrike.jets[i].progress = 0.0f;
+        g_airstrike.jets[i].velocity = normalize((Vec3){end.x-start.x, 0, end.z-start.z});
+        g_airstrike.jets[i].active = 1;
+        g_airstrike.jets[i].hasDroppedBomb = 0;
+        
+        g_airstrike.bombs[i].active = 0;
+        g_airstrike.explosions[i].active = 0;
+    }
+    
+    g_cinematic.isActive = 1;
+    g_cinematic.transitionProgress = 0.0f;
+    g_cinematic.target = (Vec3){ (start.x + end.x)/2, (start.y + end.y)/2 - 10, (start.z + end.z)/2 };
+    g_cinematic.position = (Vec3){ playerCam->x, playerCam->y + 5, playerCam->z };
+    g_cinematic.fov = g_fov;
+}
+
+void updateAirstrike(float deltaTime, Camera* playerCam) {
+    if (!g_airstrike.isActive) return;
+
+    g_airstrike.timer += deltaTime;
+
+    for (int i = 0; i < 3; i++) {
+        if (!g_airstrike.jets[i].active) continue;
+        
+        g_airstrike.jets[i].progress += deltaTime * 0.2f;
+        g_airstrike.jets[i].pos.x = lerp(g_airstrike.jets[i].startPos.x, g_airstrike.jets[i].endPos.x, g_airstrike.jets[i].progress);
+        g_airstrike.jets[i].pos.y = lerp(g_airstrike.jets[i].startPos.y, g_airstrike.jets[i].endPos.y, g_airstrike.jets[i].progress);
+        g_airstrike.jets[i].pos.z = lerp(g_airstrike.jets[i].startPos.z, g_airstrike.jets[i].endPos.z, g_airstrike.jets[i].progress);
+        
+        if (g_airstrike.jets[i].progress > 0.5f && !g_airstrike.jets[i].hasDroppedBomb) {
+            g_airstrike.jets[i].hasDroppedBomb = 1;
+            g_airstrike.bombs[i].active = 1;
+            g_airstrike.bombs[i].pos = g_airstrike.jets[i].pos;
+            g_airstrike.bombs[i].velocity = (Vec3){0, -15.0f, 0};
+            g_airstrike.bombs[i].fuse = 2.0f;
+        }
+
+        if (g_airstrike.jets[i].progress >= 1.0f) g_airstrike.jets[i].active = 0;
+    }
+    
+    for (int i = 0; i < 3; i++) {
+        if (!g_airstrike.bombs[i].active) continue;
+        
+        g_airstrike.bombs[i].fuse -= deltaTime;
+        g_airstrike.bombs[i].velocity.y -= 12.8f * deltaTime;
+        g_airstrike.bombs[i].pos.y += g_airstrike.bombs[i].velocity.y * deltaTime;
+        
+        if (g_airstrike.bombs[i].pos.y < -1.9f || g_airstrike.bombs[i].fuse <= 0) {
+            g_airstrike.bombs[i].active = 0;
+            g_airstrike.explosions[i].active = 1;
+            g_airstrike.explosions[i].pos = (Vec3){g_airstrike.bombs[i].pos.x, -1.9f, g_airstrike.bombs[i].pos.z};
+            g_airstrike.explosions[i].currentRadius = 0.0f;
+            g_airstrike.explosions[i].maxRadius = 12.0f;
+            g_airstrike.explosions[i].lifetime = 1.5f;
+            
+            float dist = sqrtf(powf(playerCam->x - g_airstrike.explosions[i].pos.x, 2) + powf(playerCam->z - g_airstrike.explosions[i].pos.z, 2));
+            if (dist < g_airstrike.explosions[i].maxRadius) {
+                printf("Player was hit by Democracy! Distance: %.2f\n", dist);
+            }
+        }
+    }
+    
+    for (int i = 0; i < 3; i++) {
+        if (!g_airstrike.explosions[i].active) continue;
+        
+        g_airstrike.explosions[i].lifetime -= deltaTime;
+        g_airstrike.explosions[i].currentRadius = lerp(0.0f, g_airstrike.explosions[i].maxRadius, 1.0f - (g_airstrike.explosions[i].lifetime / 1.5f));
+        
+        if (g_airstrike.explosions[i].lifetime <= 0) g_airstrike.explosions[i].active = 0;
+    }
+
+    if (g_airstrike.timer > 15.0f) {
+        g_airstrike.isActive = 0;
+        g_cinematic.isActive = 0;
+    }
+}
+
+void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
+    SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
+    SDL_RenderClear(ren);
+
+    SDL_Color titleColor = {0, 255, 100, 255};
+    SDL_Color optionColor = {200, 200, 200, 255};
+    SDL_Color selectedColor = {255, 255, 0, 255};
+
+    // --- Рисуем название "G OMETRICA" ---
+    drawText(ren, font, "G", WIDTH/2 - 150, HEIGHT/2 - 100, titleColor);
+    // Пропускаем место для 'E'
+    drawText(ren, font, "OMETRICA", WIDTH/2 - 80, HEIGHT/2 - 100, titleColor);
+
+    // --- Рисуем вращающийся ромб вместо 'E' ---
+    int rhombus_cx = WIDTH/2 - 115;
+    int rhombus_cy = HEIGHT/2 - 90;
+    int size = 20;
+    
+    Vec3 points[4] = {
+        {rhombus_cx, rhombus_cy - size, 0}, // top
+        {rhombus_cx + size, rhombus_cy, 0}, // right
+        {rhombus_cx, rhombus_cy + size, 0}, // bottom
+        {rhombus_cx - size, rhombus_cy, 0}  // left
+    };
+    
+    // Вращаем точки
+    for(int i=0; i<4; i++){
+        float x = points[i].x - rhombus_cx;
+        float y = points[i].y - rhombus_cy;
+        points[i].x = x * fast_cos(g_menuRhombusAngle) - y * fast_sin(g_menuRhombusAngle) + rhombus_cx;
+        points[i].y = x * fast_sin(g_menuRhombusAngle) + y * fast_cos(g_menuRhombusAngle) + rhombus_cy;
+    }
+
+    SDL_SetRenderDrawColor(ren, titleColor.r, titleColor.g, titleColor.b, 255);
+    for(int i=0; i<4; i++){
+        SDL_RenderDrawLine(ren, (int)points[i].x, (int)points[i].y, (int)points[(i+1)%4].x, (int)points[(i+1)%4].y);
+    }
+    
+    // --- Рисуем пункты меню ---
+    const char* menuItems[] = { "Start Game", "Settings", "Exit" };
+    for (int i = 0; i < 3; i++) {
+        drawText(ren, font, menuItems[i], WIDTH/2 - 80, HEIGHT/2 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
+    }
+}
+
+void drawSettingsMenu(SDL_Renderer* ren, TTF_Font* font, EditableVariable* vars, int numVars) {
+    SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
+    SDL_RenderClear(ren);
+    
+    SDL_Color titleColor = {0, 255, 100, 255};
+    SDL_Color optionColor = {200, 200, 200, 255};
+    SDL_Color selectedColor = {255, 255, 0, 255};
+    
+    drawText(ren, font, "SETTINGS", 20, 20, titleColor);
+
+    for (int i = 0; i < numVars; ++i) {
+        char buffer[128];
+        snprintf(buffer, 128, "%s: < %.4f >", vars[i].name, *vars[i].value_ptr);
+        drawText(ren, font, buffer, 50, 80 + i * 30, (i == g_settingsSelectedOption) ? selectedColor : optionColor);
+    }
+    
+    drawText(ren, font, "Back", 50, 80 + numVars * 30, (numVars == g_settingsSelectedOption) ? selectedColor : optionColor);
 }
 
 void clearZBuffer() {
@@ -3555,58 +3870,48 @@ void loadConfig(const char* filename, GameConfig* config) {
 }
 
 int main(int argc, char* argv[]) {
+    // --- ЭТАП 1: МИНИМАЛЬНЫЙ ЗАПУСК ДЛЯ ОКНА ---
     if (SDL_Init(SDL_INIT_VIDEO) < 0) return 1;
     TTF_Init();
+    init_fast_math(); // Математику считаем до окна, это быстро
+
+    SDL_Window* win = SDL_CreateWindow("GEOMETRICA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
+    if (!win) return 1;
+    SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+    
+    SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
+    SDL_RenderClear(ren);
+    TTF_Font* font = TTF_OpenFont("arial.ttf", 24); 
+    if (font) {
+        drawText(ren, font, "INITIALIZING REALITY KERNEL...", WIDTH/2 - 200, HEIGHT/2, (SDL_Color){0, 255, 100, 255});
+    }
+    SDL_RenderPresent(ren);
+
+    // --- ЭТАП 3: ВСЯ ТВОЯ СТАРАЯ ЗАГРУЗКА ИДЕТ ЗДЕСЬ, В ФОНЕ ---
+    // <<< Весь твой код, который ты прислал, теперь здесь >>>
+    
     Profiler_Init();
     initDayNightCycle();
     initPhone();
-    SDL_Window* win = SDL_CreateWindow("PS1 Style Pseudo 3D - With Quests Fixed", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
-    if (!win) return 1;
-    SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
-
+    
     AssetManager assetManager;
     AssetManager_Init(&assetManager, ren);
     
-    TTF_Font* font = AssetManager_GetFont(&assetManager, "arial.ttf", 16);
+    // Перезагружаем/получаем шрифты через менеджер для остальной игры
+    font = AssetManager_GetFont(&assetManager, "arial.ttf", 16);
     if (!font) {
         printf("Не удалось загрузить основной шрифт, выход.\n");
         return 1;
     }
-    // Можно загрузить еще один, другого размера, если надо
     TTF_Font* large_font = AssetManager_GetFont(&assetManager, "arial.ttf", 24);
 
-    GameplaySettings settings = {
+    GameConfig config = {
         .mouseSensitivity = 0.003f, .walkSpeed = 0.3f, .runSpeed = 0.5f,
         .crouchSpeedMultiplier = 0.5f, .acceleration = 10.0f, .deceleration = 15.0f,
-        .jumpForce = 0.35f, .gravity = 1.2f, .fov = 200.0f
+        .jumpForce = 0.35f, .gravity = 1.2f, .fov = 500.0f
     };
-
-    QuestSystem questSystem = {0};
-    
-    // Теперь инициализируем квесты (у них есть доступ к collisionBoxes)
-    initQuestSystem(&questSystem);
-    
-    // ДОБАВЛЯЕМ: Инициализация монет
-    initCoins();
-    initHandsSystem();
-    initBoss();
-
-    GameConfig config = {
-        .mouseSensitivity = 0.003f,
-        .walkSpeed = 0.3f,
-        .runSpeed = 0.5f,
-        .crouchSpeedMultiplier = 0.5f,
-        .acceleration = 10.0f,
-        .deceleration = 15.0f,
-        .jumpForce = 0.35f,
-        .gravity = 1.2f,
-        .fov = 500.0f  // Твое новое начальное значение FOV
-    };
-    
-    // Загружаем настройки при запуске
     loadConfig("settings.cfg", &config);
     
-    // Обновляем массив для редактора (теперь указывает на config)
     EditableVariable editorVars[] = {
         { "Mouse Sensitivity", &config.mouseSensitivity, 0.0001f, 0.001f, 0.01f },
         { "Walk Speed",        &config.walkSpeed,        0.05f,   0.1f,   1.0f  },
@@ -3615,10 +3920,19 @@ int main(int argc, char* argv[]) {
         { "Gravity",           &config.gravity,          0.1f,    0.1f,   5.0f  },
         { "Field of View",     &config.fov,              5.0f,    50.0f,  500.0f}
     };
-
     const int numEditorVars = sizeof(editorVars) / sizeof(editorVars[0]);
 
-    if (!ren) { ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE); if (!ren) return 1; }
+    QuestSystem questSystem = {0};
+    initQuestSystem(&questSystem);
+    
+    initCoins();
+    initHandsSystem();
+    initBoss();
+
+    spawnBottle((Vec3){3, -1, -3});
+    spawnBottle((Vec3){-4, -1, 2});
+    
+    // --- ЭТАП 4: ПОДГОТОВКА К ГЛАВНОМУ ЦИКЛУ ---
     SDL_SetRelativeMouseMode(SDL_TRUE);
 
     spawnBottle((Vec3){3, -1, -3});
@@ -3634,17 +3948,12 @@ spawnBottle((Vec3){-2, 0, -6});
     Vec3 faceNormals[6] = { {0,0,-1}, {0,0,1}, {0,-1,0}, {0,1,0}, {-1,0,0}, {1,0,0} };
     int edgeFaces[12][2] = { {0,2},{0,4},{0,3},{0,5}, {1,2},{1,4},{1,3},{1,5}, {2,5},{2,4},{3,4},{3,5} };
     
+    Camera cam = { .x = 0, .y = 0, .z = -8, .height = STANDING_HEIGHT, .targetHeight = STANDING_HEIGHT };
     float playerRadius = 0.3f;
 
-    Camera cam = {
-        .x = 0, .y = 0, .z = -8, 
-        .rotY = 0, .rotX = 0, .vy = 0, 
-        .vx = 0, .vz = 0, .targetVx = 0, .targetVz = 0,
-        .bobPhase = 0, .bobAmount = 0, .currentBobY = 0, .currentBobX = 0,
-        .height = STANDING_HEIGHT,
-        .targetHeight = STANDING_HEIGHT,
-        .isMoving = 0, .isRunning = 0, .isCrouching = 0
-    };
+    g_currentState = STATE_MAIN_MENU;
+    
+    SDL_SetRelativeMouseMode(SDL_TRUE);
 
     int running = 1;
     SDL_Event e;
@@ -3659,151 +3968,82 @@ spawnBottle((Vec3){-2, 0, -6});
 
     while (running) {
         Uint32 currentTime = SDL_GetTicks();
-        float deltaTime = (currentTime - lastTime) / 1000.0f;
-        if (deltaTime > 0.1f) deltaTime = 0.1f;
-        if (deltaTime < 0.001f) deltaTime = 0.001f;
-        lastTime = currentTime;
+    float deltaTime = (currentTime - lastTime) / 1000.0f;
+    if (deltaTime > 0.1f) deltaTime = 0.1f;
+    lastTime = currentTime;
 
-        Profiler_Start(PROF_OTHER);
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = 0;
-            if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_ESCAPE) running = 0;
+    const Uint8* keyState = SDL_GetKeyboardState(NULL);
 
-                // Новая обработка для "грави-перчаток"
-            if (e.type == SDL_MOUSEBUTTONDOWN) {
-                if (e.button.button == SDL_BUTTON_LEFT) {
-                    // Если целились в объект, начинаем притягивание
-                    if (g_hands.currentState == HAND_STATE_AIMING && g_hands.targetedObject) {
-                        g_hands.pulledObject = g_hands.targetedObject;
-                        g_hands.pulledObject->state = PICKUP_STATE_PULLED;
-                        g_hands.targetedObject = NULL;
-
-                        // Запускаем анимацию флика
-                        g_hands.flick.isActive = 1;
-                        g_hands.flick.progress = 0.0f;
-                    }
-                }
-                if (e.button.button == SDL_BUTTON_RIGHT && g_hands.heldObject) {
-                    rightMouseButtonHeld = 1;
-                    rightMouseHoldStartTime = SDL_GetTicks();
-                }
-            }
-             if (e.type == SDL_MOUSEBUTTONUP) {
-                if (e.button.button == SDL_BUTTON_RIGHT && g_hands.heldObject) {
-                    rightMouseButtonHeld = 0;
-                    throwObject(&cam, g_hands.currentThrowPower);
-                }
-            }
-            
-            if (rightMouseButtonHeld && g_hands.heldObject) {
-            Uint32 holdDuration = SDL_GetTicks() - rightMouseHoldStartTime;
-            float holdRatio = fminf(1.0f, (float)holdDuration / 1000.0f); // 1 секунда до макс. силы
-            g_hands.currentThrowPower = lerp(THROW_POWER_DEFAULT, THROW_POWER_MAX, holdRatio);
-        }
-                if (e.key.keysym.sym == SDLK_F1) show_editor = !show_editor;
-                
-                if (e.key.keysym.sym == SDLK_F3) g_showProfiler = !g_showProfiler;
-
-                // В главном цикле, в секции обработки событий, добавь
-                if (show_editor) {
-                    switch(e.key.keysym.sym) {
-                        case SDLK_UP:
-                            selected_item--;
-                            if (selected_item < 0) selected_item = numEditorVars - 1;
-                            break;
-                        case SDLK_DOWN:
-                            selected_item++;
-                            if (selected_item >= numEditorVars) selected_item = 0;
-                            break;
-                        case SDLK_LEFT:
-                            *editorVars[selected_item].value_ptr -= editorVars[selected_item].step;
-                            if (*editorVars[selected_item].value_ptr < editorVars[selected_item].min_val)
-                                *editorVars[selected_item].value_ptr = editorVars[selected_item].min_val;
-                            break;
-                        case SDLK_RIGHT:
-                            *editorVars[selected_item].value_ptr += editorVars[selected_item].step;
-                            if (*editorVars[selected_item].value_ptr > editorVars[selected_item].max_val)
-                                *editorVars[selected_item].value_ptr = editorVars[selected_item].max_val;
-                            break;
-                    }
-                }
-                if (!show_editor && e.key.keysym.sym == SDLK_SPACE && !cam.isCrouching) {
-                    if (isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
-                        cam.vy = config.jumpForce;
-                        cam.currentBobY -= 0.08f;
-
-                        float moveDirLen = sqrtf(cam.targetVx * cam.targetVx + cam.targetVz * cam.targetVz);
-
-                        // 2. Если игрок движется (длина вектора > 0), добавляем импульс
-                        if (moveDirLen > 0.01f) {
-                            // Нормализуем вектор, чтобы получить чистое направление (длиной 1)
-                            float dirX = cam.targetVx / moveDirLen;
-                            float dirZ = cam.targetVz / moveDirLen;
-                            
-                            // Добавляем импульс к ТЕКУЩЕЙ скорости (vx, vz)
-                            // Это даст камере дополнительный "пинок" вперед
-                            cam.vx += dirX * JUMP_FORWARD_IMPULSE;
-                            cam.vz += dirZ * JUMP_FORWARD_IMPULSE;
+    // --- ОБРАБОТКА ВВОДА В ЗАВИСИМОСТИ ОТ СОСТОЯНИЯ ---
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) g_isExiting = 1;
+        
+        if (e.type == SDL_KEYDOWN) {
+            switch (g_currentState) {
+                case STATE_MAIN_MENU:
+                    if (e.key.keysym.sym == SDLK_UP) g_menuSelectedOption = (g_menuSelectedOption - 1 + 3) % 3;
+                    if (e.key.keysym.sym == SDLK_DOWN) g_menuSelectedOption = (g_menuSelectedOption + 1) % 3;
+                    if (e.key.keysym.sym == SDLK_RETURN) {
+                        if (g_menuSelectedOption == 0) { // Start
+                            g_currentState = STATE_IN_GAME;
+                            SDL_SetRelativeMouseMode(SDL_TRUE); // Захватываем мышь
+                        } else if (g_menuSelectedOption == 1) { // Settings
+                            g_currentState = STATE_SETTINGS;
+                        } else if (g_menuSelectedOption == 2) { // Exit
+                            g_isExiting = 1; // Запускаем плавный выход
                         }
                     }
+                    break;
+                case STATE_SETTINGS:
+                    if (e.key.keysym.sym == SDLK_UP) g_settingsSelectedOption = (g_settingsSelectedOption - 1 + numEditorVars + 1) % (numEditorVars + 1);
+                    if (e.key.keysym.sym == SDLK_DOWN) g_settingsSelectedOption = (g_settingsSelectedOption + 1) % (numEditorVars + 1);
+                    if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        g_currentState = STATE_MAIN_MENU;
+                        saveConfig("settings.cfg", &config); // Сохраняем при выходе
+                    }
+                    if (g_settingsSelectedOption < numEditorVars) { // Если выбрана настройка
+                        if (e.key.keysym.sym == SDLK_LEFT) *editorVars[g_settingsSelectedOption].value_ptr -= editorVars[g_settingsSelectedOption].step;
+                        if (e.key.keysym.sym == SDLK_RIGHT) *editorVars[g_settingsSelectedOption].value_ptr += editorVars[g_settingsSelectedOption].step;
+                    } else if (e.key.keysym.sym == SDLK_RETURN) { // Если выбрано "Back"
+                        g_currentState = STATE_MAIN_MENU;
+                        saveConfig("settings.cfg", &config); // Сохраняем при выходе
+                    }
+                    break;
+                case STATE_IN_GAME:
+                    if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        g_currentState = STATE_MAIN_MENU;
+                        SDL_SetRelativeMouseMode(SDL_FALSE); // Возвращаем мышь в меню
+                    }
+                    // Вся остальная обработка ввода для игры
+                    if (e.key.keysym.sym == SDLK_p) {
+                        if (g_phone.state == PHONE_STATE_HIDDEN || g_phone.state == PHONE_STATE_HIDING) g_phone.state = PHONE_STATE_SHOWING;
+                        else if (g_phone.state == PHONE_STATE_VISIBLE || g_phone.state == PHONE_STATE_SHOWING) g_phone.state = PHONE_STATE_HIDING;
+                    }
+                    if (g_phone.state == PHONE_STATE_VISIBLE && e.key.keysym.sym == SDLK_RETURN) {
+                        Vec3 start = {cam.x - 40, 25, cam.z + 20};
+                        Vec3 end = {cam.x + 40, 25, cam.z - 20};
+                        startAirstrike(start, end, &cam);
+                        g_phone.state = PHONE_STATE_HIDING;
+                    }
+                    // <<< ВОТ ОН, ПРЫЖОК! >>>
+                if (e.key.keysym.sym == SDLK_SPACE && !cam.isCrouching) {
+                    if (isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                        cam.vy = config.jumpForce;
+                    }
                 }
-                if (e.key.keysym.sym == SDLK_F2) {  // F2 для сохранения настроек
-            saveConfig("settings.cfg", &config);
+                // <<< И F-КЛАВИШИ! >>>
+                if (e.key.keysym.sym == SDLK_F1) show_editor = !show_editor;
+                if (e.key.keysym.sym == SDLK_F3) g_showProfiler = !g_showProfiler;
+                break;
             }
-            if (e.key.keysym.sym == SDLK_UP) {
-            // Показать телефон, если он убран или убирается
-            if (g_phone.state == PHONE_STATE_HIDDEN || g_phone.state == PHONE_STATE_HIDING) {
-                g_phone.state = PHONE_STATE_SHOWING;
-            }
-            }
-            if (e.key.keysym.sym == SDLK_DOWN) {
-                // Убрать телефон, если он показан или появляется
-                if (g_phone.state == PHONE_STATE_VISIBLE || g_phone.state == PHONE_STATE_SHOWING) {
-                    g_phone.state = PHONE_STATE_HIDING;
-                }
-            }
-            // --- ЧИТЫ ДЛЯ УПРАВЛЕНИЯ ВРЕМЕНЕМ ---
-        // Используем '[' и ']' для замедления/ускорения
-        if (e.key.keysym.sym == SDLK_LEFTBRACKET) { // Клавиша '['
-            g_timeScale -= 0.5f;
-            if (g_timeScale < 0.0f) g_timeScale = 0.0f; // Не даем уйти в минус
         }
-        if (e.key.keysym.sym == SDLK_RIGHTBRACKET) { // Клавиша ']'
-            g_timeScale += 0.5f;
+         if (g_currentState == STATE_IN_GAME && e.type == SDL_MOUSEMOTION) {
+            cam.rotY += e.motion.xrel * config.mouseSensitivity;
+            cam.rotX -= e.motion.yrel * config.mouseSensitivity;
+            if (cam.rotX > 1.5f) cam.rotX = 1.5f;
+            if (cam.rotX < -1.5f) cam.rotX = -1.5f;
         }
-        
-        // Используем цифровые клавиши для установки времени
-        if (e.key.keysym.sym == SDLK_1) {
-            SetTimeOfDay(0.33f); // Утро ( ~8:00 )
-        }
-        if (e.key.keysym.sym == SDLK_2) {
-            SetTimeOfDay(0.5f); // Полдень ( 12:00 )
-        }
-        if (e.key.keysym.sym == SDLK_3) {
-            SetTimeOfDay(0.75f); // Закат ( 18:00 )
-        }
-        if (e.key.keysym.sym == SDLK_4) {
-            SetTimeOfDay(0.0f); // Полночь ( 00:00 )
-        }
-            }
-            if (e.type == SDL_MOUSEMOTION) {
-                if (!show_editor && e.type == SDL_MOUSEMOTION) {
-                cam.rotY += e.motion.xrel * config.mouseSensitivity;
-                cam.rotX -= e.motion.yrel * config.mouseSensitivity;
-                if (cam.rotX > 1.5f) cam.rotX = 1.5f;
-                if (cam.rotX < -1.5f) cam.rotX = -1.5f;
-            }
-            }
-
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
-        if (g_hands.heldObject) {
-            throwObject(&cam, 5.0f); // Слабый бросок
-        }
-
-                }
-        }
-        
+    }
         Profiler_End(PROF_OTHER);
         Profiler_Start(PROF_PHYSICS_COLLISIONS);
         
@@ -3811,6 +4051,16 @@ spawnBottle((Vec3){-2, 0, -6});
     updatePickupPhysics(&g_pickups[i], deltaTime, collisionBoxes, numCollisionBoxes, &cam);
 }
 updateShards(deltaTime);
+
+switch (g_currentState) {
+        case STATE_MAIN_MENU:
+            g_menuRhombusAngle += deltaTime * 2.0f;
+            drawMainMenu(ren, large_font);
+            break;
+        case STATE_SETTINGS:
+            drawSettingsMenu(ren, font, editorVars, numEditorVars);
+            break;
+        case STATE_IN_GAME:
         g_fov = config.fov;
         
         cam.isCrouching = keyState[SDL_SCANCODE_LCTRL];
@@ -3836,15 +4086,15 @@ updateShards(deltaTime);
         
         cam.targetVx = 0;
         cam.targetVz = 0;
-        float forwardX = sinf(cam.rotY); float forwardZ = cosf(cam.rotY);
-        float rightX = cosf(cam.rotY); float rightZ = -sinf(cam.rotY);
+        float forwardX = fast_sin(cam.rotY); float forwardZ = fast_cos(cam.rotY);
+        float rightX = fast_cos(cam.rotY); float rightZ = -fast_sin(cam.rotY);
         if (keyState[SDL_SCANCODE_W]) { cam.targetVx += forwardX * moveSpeed; cam.targetVz += forwardZ * moveSpeed; }
         if (keyState[SDL_SCANCODE_S]) { cam.targetVx -= forwardX * moveSpeed; cam.targetVz -= forwardZ * moveSpeed; }
         if (keyState[SDL_SCANCODE_A]) { cam.targetVx -= rightX * moveSpeed; cam.targetVz -= rightZ * moveSpeed; }
         if (keyState[SDL_SCANCODE_D]) { cam.targetVx += rightX * moveSpeed; cam.targetVz += rightZ * moveSpeed; }
         
         // --- НОВЫЙ БЛОК ДВИЖЕНИЯ С ИНЕРЦИЕЙ ---
-
+        if (!g_cinematic.isActive) {
         // Сначала проверяем, стоит ли камера на земле
         int grounded = isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes);
 
@@ -3954,7 +4204,8 @@ updateShards(deltaTime);
                 }
             }
         }
-        
+        }
+
         updateCameraBob(&cam, deltaTime);
 
         // Обновляем состояние и анимацию рук
@@ -3969,6 +4220,7 @@ updateShards(deltaTime);
         updatePhone(deltaTime);
         updateDayNightCycle(deltaTime, cam);
         updateWorldEvolution(deltaTime);
+        updateAirstrike(deltaTime, &cam);
 
         if (g_bossFightActive) {
         updateBoss(deltaTime, &cam);
@@ -3988,15 +4240,6 @@ updateShards(deltaTime);
         Uint8 bgR = 20 + (Uint8)(g_worldEvolution.transitionProgress * 20);
 Uint8 bgG = 20 + (Uint8)(g_worldEvolution.transitionProgress * 25);
 Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
-        // СТАНЕТ:
-        // Определяем базовый "пустой" цвет фона
-                // 1. Создаем временную камеру ТОЛЬКО для этого кадра рендеринга
-        Camera renderCam = cam; 
-
-        // 2. Применяем эффекты покачивания и тряски к этой временной камере
-        renderCam.y += cam.currentBobY;
-        renderCam.rotY += cam.currentBobX * 0.02f;
-        // ------------------------------------
 
         // Определяем цвет фона (как и было)
         const SDL_Color baseBackgroundColor = {20, 20, 30, 255}; 
@@ -4006,29 +4249,67 @@ Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
         SDL_RenderClear(ren);
         clearZBuffer();
 
+        // Выбираем, какую камеру использовать для рендера
+        Camera renderCam = cam;
+
+        // 2. Применяем эффекты покачивания и тряски к этой временной камере
+        renderCam.y += cam.currentBobY;
+        renderCam.rotY += cam.currentBobX * 0.02f;
+        if (g_cinematic.isActive) {
+            g_cinematic.fov = lerp(g_cinematic.fov, 150.0f, deltaTime * 2.0f); // Зум
+            
+            Camera cinematicRenderCam = {0};
+            cinematicRenderCam.x = g_cinematic.position.x;
+            cinematicRenderCam.y = g_cinematic.position.y;
+            cinematicRenderCam.z = g_cinematic.position.z;
+            
+            float dx = g_cinematic.target.x - cinematicRenderCam.x;
+            float dy = g_cinematic.target.y - cinematicRenderCam.y;
+            float dz = g_cinematic.target.z - cinematicRenderCam.z;
+            cinematicRenderCam.rotY = atan2f(dx, dz);
+            cinematicRenderCam.rotX = -atan2f(dy, sqrtf(dx*dx + dz*dz));
+            
+            renderCam = cinematicRenderCam;
+            g_fov = g_cinematic.fov; // Временно меняем FOV
+        } else {
+             g_fov = config.fov;
+        }
+
         // 3. Передаем renderCam ВО ВСЕ ФУНКЦИИ ОТРИСОВКИ
         drawSkybox(ren);
         drawSunAndMoon(ren, renderCam); 
 
         drawFloor(ren, renderCam);
         
-        for (int i = 1; i < numCollisionBoxes; i++) {
-            if (isBoxInFrustum_Improved(&collisionBoxes[i], renderCam)) {
-                drawOptimizedBox(ren, &collisionBoxes[i], renderCam);
-            }
-        }
-        drawEvolvingWalls(ren, renderCam);
+        // ОТРИСОВКА ПЛАТФОРМ С ОТСЕЧЕНИЕМ
+for (int i = 0; i < numCollisionBoxes; i++) {
+    // <<< ВОТ ОНО! Рисуем только то, что в кадре. >>>
+    if (isBoxInFrustum_Improved(&collisionBoxes[i], renderCam)) {
+        drawOptimizedBox(ren, &collisionBoxes[i], renderCam);
+    }
+}
 
-        for (int i = 0; i < g_numCoins; i++) {
-            if (!g_coins[i].collected && isPointInFrustum(g_coins[i].pos, renderCam)) {
-                drawCoin(ren, &g_coins[i], renderCam);
-            }
+drawEvolvingWalls(ren, renderCam); // Для этого отсечение не так важно
+
+// ОТРИСОВКА МОНЕТ С ОТСЕЧЕНИЕМ
+for (int i = 0; i < g_numCoins; i++) {
+    if (!g_coins[i].collected) {
+        // <<< И здесь тоже! Отсекаем по простой точке >>>
+        if (isPointInFrustum(g_coins[i].pos, renderCam)) {
+            drawCoin(ren, &g_coins[i], renderCam);
         }
-        for (int i = 0; i < g_numPickups; i++) {
-            if (g_pickups[i].state != PICKUP_STATE_BROKEN) {
-                drawPickupObject(ren, &g_pickups[i], renderCam);
-            }
+    }
+}
+
+// ОТРИСОВКА ПРЕДМЕТОВ С ОТСЕЧЕНИЕМ
+for (int i = 0; i < g_numPickups; i++) {
+    if (g_pickups[i].state != PICKUP_STATE_BROKEN) {
+        // <<< И здесь! >>>
+        if (isPointInFrustum(g_pickups[i].pos, renderCam)) {
+            drawPickupObject(ren, &g_pickups[i], renderCam);
         }
+    }
+}
         // [НОВЫЙ КОД] Рассчитываем траекторию, если держим объект
         if (g_hands.heldObject && rightMouseButtonHeld) {
             calculateTrajectory(&cam, g_hands.currentThrowPower, &g_trajectory, collisionBoxes, numCollisionBoxes, config.gravity);
@@ -4039,7 +4320,7 @@ Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
         // [НОВЫЙ КОД] Отрисовка луча прицеливания
         if (g_hands.currentState == HAND_STATE_AIMING) {
             Vec3 rayStart = {cam.x, cam.y + cam.height, cam.z};
-            Vec3 rayDir = {sinf(cam.rotY)*cosf(cam.rotX), -sinf(cam.rotX), cosf(cam.rotY)*cosf(cam.rotX)};
+            Vec3 rayDir = {fast_sin(cam.rotY)*fast_cos(cam.rotX), -fast_sin(cam.rotX), fast_cos(cam.rotY)*fast_cos(cam.rotX)};
             rayDir = normalize(rayDir);
 
             float rayLen = g_hands.targetedObject ? 
@@ -4050,15 +4331,24 @@ Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
             clipAndDrawLine(ren, rayStart, rayEnd, cam, (SDL_Color){255,165,0,100});
         }
 
+        // Рендерим авиаудар
+        if (g_airstrike.isActive) {
+            for (int i = 0; i < 3; i++) {
+                drawJet(ren, &g_airstrike.jets[i], renderCam);
+                drawBomb(ren, &g_airstrike.bombs[i], renderCam);
+                drawExplosion(ren, &g_airstrike.explosions[i], renderCam);
+            }
+        }
+
         drawGlassShards(ren, renderCam);
         applyGlitchEffect(ren);
         drawGlitches(ren, renderCam);
         drawBoss(ren, renderCam);
         drawTrajectory(ren,renderCam, &g_trajectory);
-        drawHands(ren, renderCam);
+        //drawHands(ren, renderCam);
         
         float lightAngle = SDL_GetTicks() * 0.0003f;
-        Vec3 lightDir = normalize((Vec3){cosf(lightAngle) * 1.5f, 2, sinf(lightAngle) * 1.5f});
+        Vec3 lightDir = normalize((Vec3){fast_cos(lightAngle) * 1.5f, 2, fast_sin(lightAngle) * 1.5f});
         for (int i = 0; i < 12; ++i) {
             float b1 = dot(faceNormals[edgeFaces[i][0]], lightDir);
             float b2 = dot(faceNormals[edgeFaces[i][1]], lightDir);
@@ -4140,7 +4430,44 @@ Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
         Profiler_End(PROF_OTHER);
         Profiler_Update();
         drawPhone(ren, font);
+
+        if (g_phone.state == PHONE_STATE_VISIBLE || g_phone.state == PHONE_STATE_SHOWING) {
+             const int phoneWidth = 250, phoneHeight = 500;
+             int currentY = (int)lerp((float)HEIGHT, (float)(HEIGHT - phoneHeight - 50), g_phone.animationProgress);
+
+             SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+             SDL_SetRenderDrawColor(ren, 25, 25, 30, 230);
+             SDL_Rect phoneBody = { WIDTH - phoneWidth - 50, currentY, phoneWidth, phoneHeight };
+             SDL_RenderFillRect(ren, &phoneBody);
+             
+             SDL_Color textColor = {200, 200, 200, 255};
+             SDL_Color selectedColor = {255, 255, 0, 255};
+             drawText(ren, font, "DEMOCRACY OS", phoneBody.x + 20, phoneBody.y + 20, textColor);
+             drawText(ren, font, "> Вызвать демократию", phoneBody.x + 30, phoneBody.y + 70, selectedColor);
+        }
         
+        // Кинематографичные полосы
+        if (g_cinematic.isActive) {
+            int barHeight = HEIGHT / 8;
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+            SDL_Rect topBar = {0, 0, WIDTH, barHeight};
+            SDL_Rect bottomBar = {0, HEIGHT - barHeight, WIDTH, barHeight};
+            SDL_RenderFillRect(ren, &topBar);
+            SDL_RenderFillRect(ren, &bottomBar);
+        }
+        break;
+    }
+        if (g_isExiting) {
+    g_exitFadeAlpha = lerp(g_exitFadeAlpha, 255.0f, deltaTime * 4.0f);
+    if (g_exitFadeAlpha > 254.0f) {
+        running = 0; // Когда экран полностью черный, выходим по-настоящему
+    }
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, (Uint8)g_exitFadeAlpha);
+    SDL_Rect fadeRect = {0, 0, WIDTH, HEIGHT};
+    SDL_RenderFillRect(ren, &fadeRect);
+}
+
         SDL_RenderPresent(ren);
     }
     AssetManager_Destroy(&assetManager);

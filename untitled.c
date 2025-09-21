@@ -551,6 +551,17 @@ typedef enum {
     STATE_IN_GAME_MP
 } GameState;
 
+// === ДОБАВЬ ЭТОТ ENUM ===
+typedef enum {
+    MP_MENU_SELECT,
+    MP_MENU_INPUT_IP
+} MultiplayerMenuState;
+
+// === ДОБАВЬ ЭТИ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
+MultiplayerMenuState g_mp_menu_state = MP_MENU_SELECT;
+char g_ip_input_buffer[100] = "127.0.0.1";
+int g_ip_input_length = 9;
+
 GameState g_currentState;
 int g_menuSelectedOption = 0;
 int g_settingsSelectedOption = 0;
@@ -595,6 +606,8 @@ int g_myPlayerID = -1;
 
 int g_isExiting = 0;       // Флаг, что мы в процессе выхода
 float g_exitFadeAlpha = 0.0f;
+
+SDLNet_SocketSet g_socket_set;
 
 #define LUT_SIZE 3600 // Точность до 0.1 градуса
 float sin_table[LUT_SIZE];
@@ -3810,18 +3823,46 @@ void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
     }
 }
 // === ДОБАВЬ ЭТУ НОВУЮ ФУНКЦИЮ ===
+// === ЗАМЕНИ drawMultiplayerMenu ===
 void drawMultiplayerMenu(SDL_Renderer* ren, TTF_Font* font) {
     SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
     SDL_RenderClear(ren);
 
     SDL_Color titleColor = {0, 255, 100, 255};
     SDL_Color optionColor = {200, 200, 200, 255};
-    SDL_Color disabledColor = {100, 100, 100, 255};
+    SDL_Color selectedColor = {255, 255, 0, 255};
 
-    drawText(ren, font, "MULTIPLAYER", WIDTH/2 - 100, HEIGHT/2 - 100, titleColor);
-    drawText(ren, font, "Host Game (Soon)", WIDTH/2 - 100, HEIGHT/2 - 20, disabledColor);
-    drawText(ren, font, "Join Game (Soon)", WIDTH/2 - 100, HEIGHT/2 + 20, disabledColor);
-    drawText(ren, font, "Press [Escape] to go back", WIDTH/2 - 150, HEIGHT - 100, optionColor);
+    drawText(ren, font, "MULTIPLAYER", WIDTH/2 - 100, 100, titleColor);
+
+    // <<< ВОТ ОНА, БЛЯДЬ, ПРОВЕРКА, КОТОРОЙ НЕ ХВАТАЛО >>>
+    if (g_mp_menu_state == MP_MENU_SELECT) {
+        // Рисуем меню выбора
+        const char* menuItems[] = { "Host Game", "Join Game", "Back" };
+        for (int i = 0; i < 3; i++) {
+            char itemText[128];
+            snprintf(itemText, sizeof(itemText), "%s %s", (i == g_menuSelectedOption) ? ">" : " ", menuItems[i]);
+            drawText(ren, font, itemText, WIDTH/2 - 100, 200 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
+        }
+        drawText(ren, font, "Host: To find your IP, open Google and search 'my ip address'", 20, HEIGHT - 50, (SDL_Color){100,100,100,255});
+
+    } else if (g_mp_menu_state == MP_MENU_INPUT_IP) {
+        // Рисуем поле для ввода IP
+        drawText(ren, font, "Enter Host IP Address:", WIDTH/2 - 150, 200, optionColor);
+        
+        char inputLine[128];
+        snprintf(inputLine, sizeof(inputLine), "> %s", g_ip_input_buffer);
+        drawText(ren, font, inputLine, WIDTH/2 - 150, 240, selectedColor);
+
+        // Мигающий курсор
+        if ((SDL_GetTicks() / 500) % 2 == 0) {
+            int text_w, text_h;
+            TTF_SizeUTF8(font, inputLine, &text_w, &text_h);
+            SDL_Rect cursorRect = { WIDTH/2 - 150 + text_w, 240, 10, 20 };
+            SDL_SetRenderDrawColor(ren, selectedColor.r, selectedColor.g, selectedColor.b, 255);
+            SDL_RenderFillRect(ren, &cursorRect);
+        }
+        drawText(ren, font, "Press [Enter] to connect, [Escape] to cancel", 20, HEIGHT - 50, (SDL_Color){100,100,100,255});
+    }
 }
 
 void drawSettingsMenu(SDL_Renderer* ren, TTF_Font* font, EditableVariable* vars, int numVars) {
@@ -3911,85 +3952,97 @@ void init_multiplayer() {
 }
 
 void start_server() {
-    printf("Starting server on port 1234...\n");
+    printf("[SERVER] Attempting to start on port 1234...\n");
     if (SDLNet_ResolveHost(&g_server_ip, NULL, 1234) == -1) {
-        printf("SDLNet_ResolveHost: %s\n", SDLNet_GetError());
+        printf("[SERVER] [FATAL] SDLNet_ResolveHost: %s\n", SDLNet_GetError());
         return;
     }
+    printf("[SERVER] Host resolved.\n");
     g_server_socket = SDLNet_TCP_Open(&g_server_ip);
     if (!g_server_socket) {
-        printf("SDLNet_TCP_Open: %s\n", SDLNet_GetError());
+        printf("[SERVER] [FATAL] SDLNet_TCP_Open: %s\n", SDLNet_GetError());
         return;
     }
-    g_isServer = 1;
-    g_isMultiplayer = 1;
-    g_players[0].active = 1; // Мы, как сервер, всегда игрок #0
-    printf("Server started successfully!\n");
+    g_socket_set = SDLNet_AllocSocketSet(MAX_PLAYERS);
+    SDLNet_TCP_AddSocket(g_socket_set, g_server_socket);
+    
+    g_isServer = 1; g_isMultiplayer = 1; g_players[0].active = 1; g_myPlayerID = 0;
+    printf("[SERVER] Server started successfully!\n");
 }
 
-void connect_to_server(const char* ip_address) {
-    printf("Connecting to %s:1234...\n", ip_address);
+int connect_to_server(const char* ip_address) {
+    printf("[CLIENT] Attempting to connect to %s:1234...\n", ip_address);
     if (SDLNet_ResolveHost(&g_server_ip, ip_address, 1234) == -1) {
-        printf("SDLNet_ResolveHost: %s\n", SDLNet_GetError());
-        return;
+        printf("[CLIENT] [FATAL] SDLNet_ResolveHost: %s\n", SDLNet_GetError());
+        return 0;
     }
+    printf("[CLIENT] Host resolved.\n");
     g_server_socket = SDLNet_TCP_Open(&g_server_ip);
     if (!g_server_socket) {
-        printf("SDLNet_TCP_Open: %s\n", SDLNet_GetError());
-        return;
+        printf("[CLIENT] [FATAL] SDLNet_TCP_Open: %s\n", SDLNet_GetError());
+        return 0;
     }
-
-    // <<< ГЛАВНЫЙ ФИКС: Получаем свой ID от сервера >>>
-    SDLNet_TCP_Recv(g_server_socket, &g_myPlayerID, sizeof(int));
-    if (g_myPlayerID != -1) {
-        g_isMultiplayer = 1;
-        printf("Connected to server! I am Player %d\n", g_myPlayerID);
-    } else {
-         printf("Server is full or sent invalid data.\n");
-         SDLNet_TCP_Close(g_server_socket);
+    printf("[CLIENT] Connection established! Awaiting Player ID...\n");
+    
+    if (SDLNet_TCP_Recv(g_server_socket, &g_myPlayerID, sizeof(int)) <= 0) {
+        printf("[CLIENT] [FATAL] Failed to receive player ID from server: %s\n", SDLNet_GetError());
+        SDLNet_TCP_Close(g_server_socket);
+        return 0;
     }
-
+    
+    g_isServer = 0;
+    g_isMultiplayer = 1;
+    printf("[CLIENT] Success! I am Player %d\n", g_myPlayerID);
+    return 1;
 }
 
 // === ЗАМЕНИ СТАРУЮ update_multiplayer НА ЭТУ ===
 void update_multiplayer(Camera* cam) {
     if (!g_isMultiplayer) return;
-
     if (g_isServer) {
-        // --- ЛОГИКА СЕРВЕРА ---
-        TCPsocket new_client = SDLNet_TCP_Accept(g_server_socket);
-        if (new_client) {
+        // --- СЕРВЕР ---
+        // <<< ВОТ ОН, ДАТЧИК ДВИЖЕНИЯ >>>
+        // Проверяем, есть ли активность, но НЕ ЖДЁМ (таймаут 0)
+        int num_ready = SDLNet_CheckSockets(g_socket_set, 0);
+        if (num_ready > 0) {
+            // Проверяем, не на главном ли сокете активность (новый клиент)
+            if (SDLNet_SocketReady(g_server_socket)) {
+                TCPsocket new_client = SDLNet_TCP_Accept(g_server_socket);
+                if (new_client) {
+                    for (int i = 1; i < MAX_PLAYERS; i++) {
+                        if (!g_players[i].active) {
+                            g_players[i].active = 1;
+                            g_players[i].socket = new_client;
+                            SDLNet_TCP_AddSocket(g_socket_set, new_client); // Добавляем в "прослушку"
+                            SDLNet_TCP_Send(new_client, &i, sizeof(int));
+                            printf("[SERVER] Player %d connected!\n", i);
+                            break;
+                        }
+                    }
+                }
+            }
+            // Проверяем активность на сокетах клиентов (прислали данные)
             for (int i = 1; i < MAX_PLAYERS; i++) {
-                if (!g_players[i].active) {
-                    g_players[i].active = 1;
-                    g_players[i].socket = new_client;
-                    // <<< ГЛАВНЫЙ ФИКС: Говорим клиенту, кто он такой >>>
-                    SDLNet_TCP_Send(new_client, &i, sizeof(int)); 
-                    printf("Player %d connected!\n", i);
-                    break;
+                if (g_players[i].active && SDLNet_SocketReady(g_players[i].socket)) {
+                    if (SDLNet_TCP_Recv(g_players[i].socket, &g_players[i].pos, sizeof(Vec3)) <= 0) {
+                        printf("[SERVER] Player %d disconnected.\n", i);
+                        SDLNet_TCP_DelSocket(g_socket_set, g_players[i].socket);
+                        SDLNet_TCP_Close(g_players[i].socket);
+                        g_players[i].active = 0;
+                        g_players[i].socket = NULL;
+                    }
                 }
             }
         }
         
-        g_players[0].pos.x = cam->x; g_players[0].pos.y = cam->y; g_players[0].pos.z = cam->z;
-
-        for (int i = 1; i < MAX_PLAYERS; i++) {
-            if (g_players[i].active) {
-                // Пытаемся получить их позицию. Если ошибка - дисконнект
-                if (SDLNet_TCP_Recv(g_players[i].socket, &g_players[i].pos, sizeof(Vec3)) <= 0) {
-                    printf("Player %d disconnected.\n", i);
-                    g_players[i].active = 0;
-                    SDLNet_TCP_Close(g_players[i].socket);
-                    g_players[i].socket = NULL;
-                }
-            }
-        }
+        g_players[0].pos = (Vec3){cam->x, cam->y, cam->z};
         // Рассылаем всем обновленное состояние
         for (int i = 1; i < MAX_PLAYERS; i++) {
             if (g_players[i].active) {
                 SDLNet_TCP_Send(g_players[i].socket, g_players, sizeof(Player) * MAX_PLAYERS);
             }
         }
+
     } else {
         // --- ЛОГИКА КЛИЕНТА ---
         Vec3 mypos = {cam->x, cam->y, cam->z};
@@ -4001,6 +4054,10 @@ void update_multiplayer(Camera* cam) {
 void shutdown_multiplayer() {
     if (g_isMultiplayer) {
         printf("Shutting down multiplayer...\n");
+        if (g_socket_set) {
+            SDLNet_FreeSocketSet(g_socket_set); // <<< Чистим за собой
+            g_socket_set = NULL;
+        }
         if (g_server_socket) {
             SDLNet_TCP_Close(g_server_socket);
             g_server_socket = NULL;
@@ -4128,6 +4185,14 @@ spawnBottle((Vec3){-2, 0, -6});
     // --- ОБРАБОТКА ВВОДА ---
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) g_isExiting = 1;
+
+        // <<< ВОТ ОНА, БЛЯДЬ! ЛОГИКА ВВОДА ТЕКСТА! >>>
+        if ((g_currentState == STATE_MULTIPLAYER_MENU && g_mp_menu_state == MP_MENU_INPUT_IP) && e.type == SDL_TEXTINPUT) {
+            if (g_ip_input_length < 99) { 
+                strcat(g_ip_input_buffer, e.text.text); 
+                g_ip_input_length++; 
+            }
+        }
         
         if (e.type == SDL_KEYDOWN) {
             switch (g_currentState) {
@@ -4149,17 +4214,37 @@ spawnBottle((Vec3){-2, 0, -6});
                     break;
                     
                 case STATE_MULTIPLAYER_MENU:
-                if (e.key.keysym.sym == SDLK_h) { // 'H' for Host
-                        start_server();
-                        g_currentState = STATE_IN_GAME_MP;
-                        SDL_SetRelativeMouseMode(SDL_TRUE);
+                    // <<< ВОТ ОН, ФИКС. ТЕПЕРЬ ВСЯ ЛОГИКА ЗДЕСЬ >>>
+                    if (g_mp_menu_state == MP_MENU_SELECT) {
+                        if (e.key.keysym.sym == SDLK_UP) g_menuSelectedOption = (g_menuSelectedOption - 1 + 3) % 3;
+                        if (e.key.keysym.sym == SDLK_DOWN) g_menuSelectedOption = (g_menuSelectedOption + 1) % 3;
+                        if (e.key.keysym.sym == SDLK_RETURN) {
+                            if (g_menuSelectedOption == 0) { // Host
+                                start_server();
+                                g_currentState = STATE_IN_GAME_MP;
+                                SDL_SetRelativeMouseMode(SDL_TRUE);
+                            } else if (g_menuSelectedOption == 1) { // Join
+                                g_mp_menu_state = MP_MENU_INPUT_IP; // Просто меняем состояние
+                                SDL_StartTextInput();
+                            } else if (g_menuSelectedOption == 2) { // Back
+                                g_currentState = STATE_MAIN_MENU;
+                                g_menuSelectedOption = 0;
+                            }
+                        }
+                    } else if (g_mp_menu_state == MP_MENU_INPUT_IP) {
+                        if (e.key.keysym.sym == SDLK_BACKSPACE && g_ip_input_length > 0) { g_ip_input_length--; g_ip_input_buffer[g_ip_input_length] = '\0'; }
+                        if (e.key.keysym.sym == SDLK_RETURN) {
+                            if (connect_to_server(g_ip_input_buffer)) { // Пробуем подключиться
+                                g_currentState = STATE_IN_GAME_MP;
+                                SDL_SetRelativeMouseMode(SDL_TRUE);
+                            } else {
+                                printf("!!! CONNECTION FAILED !!!\n"); // Если не вышло - остаемся в меню
+                            }
+                            SDL_StopTextInput();
+                            g_mp_menu_state = MP_MENU_SELECT;
+                        }
                     }
-                    if (e.key.keysym.sym == SDLK_j) { // 'J' for Join
-                        connect_to_server("127.0.0.1"); // Пока подключаемся к себе
-                        g_currentState = STATE_IN_GAME_MP;
-                        SDL_SetRelativeMouseMode(SDL_TRUE);
-                    }
-                    if (e.key.keysym.sym == SDLK_ESCAPE) g_currentState = STATE_MAIN_MENU;
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { g_currentState = STATE_MAIN_MENU; SDL_StopTextInput(); g_mp_menu_state = MP_MENU_SELECT; g_menuSelectedOption = 0;}
                     break;
                     
                 case STATE_SETTINGS:
@@ -4244,15 +4329,9 @@ spawnBottle((Vec3){-2, 0, -6});
             break;
             
         case STATE_MULTIPLAYER_MENU:
-                // Вместо старой функции, новая
-                SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
-                SDL_RenderClear(ren);
-                drawText(ren, large_font, "MULTIPLAYER", WIDTH/2 - 100, HEIGHT/2 - 100, (SDL_Color){0, 255, 100, 255});
-                drawText(ren, font, "Press [H] to Host Game", WIDTH/2 - 100, HEIGHT/2 - 20, (SDL_Color){255, 255, 255, 255});
-                drawText(ren, font, "Press [J] to Join Game (localhost)", WIDTH/2 - 100, HEIGHT/2 + 20, (SDL_Color){255, 255, 255, 255});
-                drawText(ren, font, "Press [Escape] to go back", WIDTH/2 - 150, HEIGHT - 100, (SDL_Color){200, 200, 200, 255});
+                drawMultiplayerMenu(ren, large_font);
                 break;
-            
+
         case STATE_SETTINGS:
             drawSettingsMenu(ren, font, editorVars, numEditorVars);
             break;

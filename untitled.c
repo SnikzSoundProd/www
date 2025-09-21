@@ -5,6 +5,7 @@
 #include <string.h>
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <SDL_net.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -13,6 +14,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 }
 #endif
 
+#define MAX_PLAYERS 4
 // === ИСПРАВЛЕНИЕ 2: Убираем магические числа ===
 #define MAX_INPUT_LENGTH 100
 #define CONFIG_LINE_SIZE 256
@@ -211,6 +213,12 @@ typedef struct {
     AABB bounds;
     SDL_Color color;
 } CollisionBox;
+
+typedef struct {
+    int active;
+    Vec3 pos;
+    TCPsocket socket; // У каждого игрока свой "канал связи"
+} Player;
 
 typedef enum {
     PICKUP_TYPE_BOTTLE,
@@ -538,8 +546,21 @@ typedef struct {
 typedef enum {
     STATE_MAIN_MENU,
     STATE_SETTINGS,
-    STATE_IN_GAME
+    STATE_MULTIPLAYER_MENU, // Новый экран для выбора "Host" или "Join"
+    STATE_IN_GAME_SP,       // Синглплеер (SP)
+    STATE_IN_GAME_MP
 } GameState;
+
+// === ДОБАВЬ ЭТОТ ENUM ===
+typedef enum {
+    MP_MENU_SELECT,
+    MP_MENU_INPUT_IP
+} MultiplayerMenuState;
+
+// === ДОБАВЬ ЭТИ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
+MultiplayerMenuState g_mp_menu_state = MP_MENU_SELECT;
+char g_ip_input_buffer[100] = "127.0.0.1";
+int g_ip_input_length = 9;
 
 GameState g_currentState;
 int g_menuSelectedOption = 0;
@@ -575,8 +596,18 @@ HandsSystem g_hands;
 AirstrikeEvent g_airstrike;
 CinematicState g_cinematic;
 
+int g_isMultiplayer = 0;
+int g_isServer = 0;
+Player g_players[MAX_PLAYERS];
+IPaddress g_server_ip;
+TCPsocket g_server_socket;
+// === ДОБАВЬ ЭТУ ГЛОБАЛЬНУЮ ПЕРЕМЕННУЮ ===
+int g_myPlayerID = -1;
+
 int g_isExiting = 0;       // Флаг, что мы в процессе выхода
 float g_exitFadeAlpha = 0.0f;
+
+SDLNet_SocketSet g_socket_set;
 
 #define LUT_SIZE 3600 // Точность до 0.1 градуса
 float sin_table[LUT_SIZE];
@@ -3785,10 +3816,52 @@ void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
         SDL_RenderDrawLine(ren, (int)points[i].x, (int)points[i].y, (int)points[(i+1)%4].x, (int)points[(i+1)%4].y);
     }
     
-    // --- Рисуем пункты меню ---
-    const char* menuItems[] = { "Start Game", "Settings", "Exit" };
-    for (int i = 0; i < 3; i++) {
+    // --- Рисуем пункты меню (ТЕПЕРЬ 4 ШТУКИ!) ---
+    const char* menuItems[] = { "Single Player", "Multiplayer", "Settings", "Exit" };
+    for (int i = 0; i < 4; i++) {  // ← Изменено с 3 на 4
         drawText(ren, font, menuItems[i], WIDTH/2 - 80, HEIGHT/2 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
+    }
+}
+// === ДОБАВЬ ЭТУ НОВУЮ ФУНКЦИЮ ===
+// === ЗАМЕНИ drawMultiplayerMenu ===
+void drawMultiplayerMenu(SDL_Renderer* ren, TTF_Font* font) {
+    SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
+    SDL_RenderClear(ren);
+
+    SDL_Color titleColor = {0, 255, 100, 255};
+    SDL_Color optionColor = {200, 200, 200, 255};
+    SDL_Color selectedColor = {255, 255, 0, 255};
+
+    drawText(ren, font, "MULTIPLAYER", WIDTH/2 - 100, 100, titleColor);
+
+    // <<< ВОТ ОНА, БЛЯДЬ, ПРОВЕРКА, КОТОРОЙ НЕ ХВАТАЛО >>>
+    if (g_mp_menu_state == MP_MENU_SELECT) {
+        // Рисуем меню выбора
+        const char* menuItems[] = { "Host Game", "Join Game", "Back" };
+        for (int i = 0; i < 3; i++) {
+            char itemText[128];
+            snprintf(itemText, sizeof(itemText), "%s %s", (i == g_menuSelectedOption) ? ">" : " ", menuItems[i]);
+            drawText(ren, font, itemText, WIDTH/2 - 100, 200 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
+        }
+        drawText(ren, font, "Host: To find your IP, open Google and search 'my ip address'", 20, HEIGHT - 50, (SDL_Color){100,100,100,255});
+
+    } else if (g_mp_menu_state == MP_MENU_INPUT_IP) {
+        // Рисуем поле для ввода IP
+        drawText(ren, font, "Enter Host IP Address:", WIDTH/2 - 150, 200, optionColor);
+        
+        char inputLine[128];
+        snprintf(inputLine, sizeof(inputLine), "> %s", g_ip_input_buffer);
+        drawText(ren, font, inputLine, WIDTH/2 - 150, 240, selectedColor);
+
+        // Мигающий курсор
+        if ((SDL_GetTicks() / 500) % 2 == 0) {
+            int text_w, text_h;
+            TTF_SizeUTF8(font, inputLine, &text_w, &text_h);
+            SDL_Rect cursorRect = { WIDTH/2 - 150 + text_w, 240, 10, 20 };
+            SDL_SetRenderDrawColor(ren, selectedColor.r, selectedColor.g, selectedColor.b, 255);
+            SDL_RenderFillRect(ren, &cursorRect);
+        }
+        drawText(ren, font, "Press [Enter] to connect, [Escape] to cancel", 20, HEIGHT - 50, (SDL_Color){100,100,100,255});
     }
 }
 
@@ -3869,11 +3942,143 @@ void loadConfig(const char* filename, GameConfig* config) {
     printf("Настройки загружены из %s\n", filename);
 }
 
+void init_multiplayer() {
+    SDLNet_Init();
+    g_isMultiplayer = 0;
+    g_isServer = 0;
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        g_players[i].active = 0;
+    }
+}
+
+void start_server() {
+    printf("[SERVER] Attempting to start on port 1234...\n");
+    if (SDLNet_ResolveHost(&g_server_ip, NULL, 1234) == -1) {
+        printf("[SERVER] [FATAL] SDLNet_ResolveHost: %s\n", SDLNet_GetError());
+        return;
+    }
+    printf("[SERVER] Host resolved.\n");
+    g_server_socket = SDLNet_TCP_Open(&g_server_ip);
+    if (!g_server_socket) {
+        printf("[SERVER] [FATAL] SDLNet_TCP_Open: %s\n", SDLNet_GetError());
+        return;
+    }
+    g_socket_set = SDLNet_AllocSocketSet(MAX_PLAYERS);
+    SDLNet_TCP_AddSocket(g_socket_set, g_server_socket);
+    
+    g_isServer = 1; g_isMultiplayer = 1; g_players[0].active = 1; g_myPlayerID = 0;
+    printf("[SERVER] Server started successfully!\n");
+}
+
+int connect_to_server(const char* ip_address) {
+    printf("[CLIENT] Attempting to connect to %s:1234...\n", ip_address);
+    if (SDLNet_ResolveHost(&g_server_ip, ip_address, 1234) == -1) {
+        printf("[CLIENT] [FATAL] SDLNet_ResolveHost: %s\n", SDLNet_GetError());
+        return 0;
+    }
+    printf("[CLIENT] Host resolved.\n");
+    g_server_socket = SDLNet_TCP_Open(&g_server_ip);
+    if (!g_server_socket) {
+        printf("[CLIENT] [FATAL] SDLNet_TCP_Open: %s\n", SDLNet_GetError());
+        return 0;
+    }
+    printf("[CLIENT] Connection established! Awaiting Player ID...\n");
+    
+    if (SDLNet_TCP_Recv(g_server_socket, &g_myPlayerID, sizeof(int)) <= 0) {
+        printf("[CLIENT] [FATAL] Failed to receive player ID from server: %s\n", SDLNet_GetError());
+        SDLNet_TCP_Close(g_server_socket);
+        return 0;
+    }
+    
+    g_isServer = 0;
+    g_isMultiplayer = 1;
+    printf("[CLIENT] Success! I am Player %d\n", g_myPlayerID);
+    return 1;
+}
+
+// === ЗАМЕНИ СТАРУЮ update_multiplayer НА ЭТУ ===
+void update_multiplayer(Camera* cam) {
+    if (!g_isMultiplayer) return;
+    if (g_isServer) {
+        // --- СЕРВЕР ---
+        // <<< ВОТ ОН, ДАТЧИК ДВИЖЕНИЯ >>>
+        // Проверяем, есть ли активность, но НЕ ЖДЁМ (таймаут 0)
+        int num_ready = SDLNet_CheckSockets(g_socket_set, 0);
+        if (num_ready > 0) {
+            // Проверяем, не на главном ли сокете активность (новый клиент)
+            if (SDLNet_SocketReady(g_server_socket)) {
+                TCPsocket new_client = SDLNet_TCP_Accept(g_server_socket);
+                if (new_client) {
+                    for (int i = 1; i < MAX_PLAYERS; i++) {
+                        if (!g_players[i].active) {
+                            g_players[i].active = 1;
+                            g_players[i].socket = new_client;
+                            SDLNet_TCP_AddSocket(g_socket_set, new_client); // Добавляем в "прослушку"
+                            SDLNet_TCP_Send(new_client, &i, sizeof(int));
+                            printf("[SERVER] Player %d connected!\n", i);
+                            break;
+                        }
+                    }
+                }
+            }
+            // Проверяем активность на сокетах клиентов (прислали данные)
+            for (int i = 1; i < MAX_PLAYERS; i++) {
+                if (g_players[i].active && SDLNet_SocketReady(g_players[i].socket)) {
+                    if (SDLNet_TCP_Recv(g_players[i].socket, &g_players[i].pos, sizeof(Vec3)) <= 0) {
+                        printf("[SERVER] Player %d disconnected.\n", i);
+                        SDLNet_TCP_DelSocket(g_socket_set, g_players[i].socket);
+                        SDLNet_TCP_Close(g_players[i].socket);
+                        g_players[i].active = 0;
+                        g_players[i].socket = NULL;
+                    }
+                }
+            }
+        }
+        
+        g_players[0].pos = (Vec3){cam->x, cam->y, cam->z};
+        // Рассылаем всем обновленное состояние
+        for (int i = 1; i < MAX_PLAYERS; i++) {
+            if (g_players[i].active) {
+                SDLNet_TCP_Send(g_players[i].socket, g_players, sizeof(Player) * MAX_PLAYERS);
+            }
+        }
+
+    } else {
+        // --- ЛОГИКА КЛИЕНТА ---
+        Vec3 mypos = {cam->x, cam->y, cam->z};
+        SDLNet_TCP_Send(g_server_socket, &mypos, sizeof(Vec3));
+        SDLNet_TCP_Recv(g_server_socket, g_players, sizeof(Player) * MAX_PLAYERS);
+    }
+}
+
+void shutdown_multiplayer() {
+    if (g_isMultiplayer) {
+        printf("Shutting down multiplayer...\n");
+        if (g_socket_set) {
+            SDLNet_FreeSocketSet(g_socket_set); // <<< Чистим за собой
+            g_socket_set = NULL;
+        }
+        if (g_server_socket) {
+            SDLNet_TCP_Close(g_server_socket);
+            g_server_socket = NULL;
+        }
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            if (g_players[i].socket) {
+                SDLNet_TCP_Close(g_players[i].socket);
+                g_players[i].socket = NULL;
+            }
+        }
+        g_isMultiplayer = 0;
+        g_isServer = 0;
+    }
+}
+
 int main(int argc, char* argv[]) {
     // --- ЭТАП 1: МИНИМАЛЬНЫЙ ЗАПУСК ДЛЯ ОКНА ---
     if (SDL_Init(SDL_INIT_VIDEO) < 0) return 1;
     TTF_Init();
     init_fast_math(); // Математику считаем до окна, это быстро
+    init_multiplayer();
 
     SDL_Window* win = SDL_CreateWindow("GEOMETRICA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
     if (!win) return 1;
@@ -3966,34 +4171,82 @@ spawnBottle((Vec3){-2, 0, -6});
     int rightMouseButtonHeld = 0; // [НОВЫЙ КОД]
     Uint32 rightMouseHoldStartTime = 0;
 
+    // --- ОБРАБОТКА ВВОДА В ЗАВИСИМОСТИ ОТ СОСТОЯНИЯ ---
     while (running) {
-        Uint32 currentTime = SDL_GetTicks();
+    Uint32 currentTime = SDL_GetTicks();
     float deltaTime = (currentTime - lastTime) / 1000.0f;
     if (deltaTime > 0.1f) deltaTime = 0.1f;
     lastTime = currentTime;
 
     const Uint8* keyState = SDL_GetKeyboardState(NULL);
 
-    // --- ОБРАБОТКА ВВОДА В ЗАВИСИМОСТИ ОТ СОСТОЯНИЯ ---
+    // --- PROFILER: Начинаем замер "прочего" времени ---
+    Profiler_Start(PROF_OTHER);
+    // --- ОБРАБОТКА ВВОДА ---
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) g_isExiting = 1;
+
+        // <<< ВОТ ОНА, БЛЯДЬ! ЛОГИКА ВВОДА ТЕКСТА! >>>
+        if ((g_currentState == STATE_MULTIPLAYER_MENU && g_mp_menu_state == MP_MENU_INPUT_IP) && e.type == SDL_TEXTINPUT) {
+            if (g_ip_input_length < 99) { 
+                strcat(g_ip_input_buffer, e.text.text); 
+                g_ip_input_length++; 
+            }
+        }
         
         if (e.type == SDL_KEYDOWN) {
             switch (g_currentState) {
                 case STATE_MAIN_MENU:
-                    if (e.key.keysym.sym == SDLK_UP) g_menuSelectedOption = (g_menuSelectedOption - 1 + 3) % 3;
-                    if (e.key.keysym.sym == SDLK_DOWN) g_menuSelectedOption = (g_menuSelectedOption + 1) % 3;
+                    if (e.key.keysym.sym == SDLK_UP) g_menuSelectedOption = (g_menuSelectedOption - 1 + 4) % 4;
+                    if (e.key.keysym.sym == SDLK_DOWN) g_menuSelectedOption = (g_menuSelectedOption + 1) % 4;
                     if (e.key.keysym.sym == SDLK_RETURN) {
-                        if (g_menuSelectedOption == 0) { // Start
-                            g_currentState = STATE_IN_GAME;
+                        if (g_menuSelectedOption == 0) { // Single Player
+                            g_currentState = STATE_IN_GAME_SP;
                             SDL_SetRelativeMouseMode(SDL_TRUE); // Захватываем мышь
-                        } else if (g_menuSelectedOption == 1) { // Settings
+                        } else if (g_menuSelectedOption == 1) { // Multiplayer
+                            g_currentState = STATE_MULTIPLAYER_MENU;
+                        } else if (g_menuSelectedOption == 2) { // Settings
                             g_currentState = STATE_SETTINGS;
-                        } else if (g_menuSelectedOption == 2) { // Exit
+                        } else if (g_menuSelectedOption == 3) { // Exit
                             g_isExiting = 1; // Запускаем плавный выход
                         }
                     }
                     break;
+                    
+                case STATE_MULTIPLAYER_MENU:
+                    // <<< ВОТ ОН, ФИКС. ТЕПЕРЬ ВСЯ ЛОГИКА ЗДЕСЬ >>>
+                    if (g_mp_menu_state == MP_MENU_SELECT) {
+                        if (e.key.keysym.sym == SDLK_UP) g_menuSelectedOption = (g_menuSelectedOption - 1 + 3) % 3;
+                        if (e.key.keysym.sym == SDLK_DOWN) g_menuSelectedOption = (g_menuSelectedOption + 1) % 3;
+                        if (e.key.keysym.sym == SDLK_RETURN) {
+                            if (g_menuSelectedOption == 0) { // Host
+                                start_server();
+                                g_currentState = STATE_IN_GAME_MP;
+                                SDL_SetRelativeMouseMode(SDL_TRUE);
+                            } else if (g_menuSelectedOption == 1) { // Join
+                                g_mp_menu_state = MP_MENU_INPUT_IP; // Просто меняем состояние
+                                SDL_StartTextInput();
+                            } else if (g_menuSelectedOption == 2) { // Back
+                                g_currentState = STATE_MAIN_MENU;
+                                g_menuSelectedOption = 0;
+                            }
+                        }
+                    } else if (g_mp_menu_state == MP_MENU_INPUT_IP) {
+                        if (e.key.keysym.sym == SDLK_BACKSPACE && g_ip_input_length > 0) { g_ip_input_length--; g_ip_input_buffer[g_ip_input_length] = '\0'; }
+                        if (e.key.keysym.sym == SDLK_RETURN) {
+                            if (connect_to_server(g_ip_input_buffer)) { // Пробуем подключиться
+                                g_currentState = STATE_IN_GAME_MP;
+                                SDL_SetRelativeMouseMode(SDL_TRUE);
+                            } else {
+                                printf("!!! CONNECTION FAILED !!!\n"); // Если не вышло - остаемся в меню
+                            }
+                            SDL_StopTextInput();
+                            g_mp_menu_state = MP_MENU_SELECT;
+                        }
+                    }
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { g_currentState = STATE_MAIN_MENU; SDL_StopTextInput(); g_mp_menu_state = MP_MENU_SELECT; g_menuSelectedOption = 0;}
+                    break;
+                    
                 case STATE_SETTINGS:
                     if (e.key.keysym.sym == SDLK_UP) g_settingsSelectedOption = (g_settingsSelectedOption - 1 + numEditorVars + 1) % (numEditorVars + 1);
                     if (e.key.keysym.sym == SDLK_DOWN) g_settingsSelectedOption = (g_settingsSelectedOption + 1) % (numEditorVars + 1);
@@ -4009,7 +4262,8 @@ spawnBottle((Vec3){-2, 0, -6});
                         saveConfig("settings.cfg", &config); // Сохраняем при выходе
                     }
                     break;
-                case STATE_IN_GAME:
+                    
+                case STATE_IN_GAME_SP:
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
                         g_currentState = STATE_MAIN_MENU;
                         SDL_SetRelativeMouseMode(SDL_FALSE); // Возвращаем мышь в меню
@@ -4025,450 +4279,541 @@ spawnBottle((Vec3){-2, 0, -6});
                         startAirstrike(start, end, &cam);
                         g_phone.state = PHONE_STATE_HIDING;
                     }
-                    // <<< ВОТ ОН, ПРЫЖОК! >>>
-                if (e.key.keysym.sym == SDLK_SPACE && !cam.isCrouching) {
-                    if (isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
-                        cam.vy = config.jumpForce;
+                    // ПРЫЖОК
+                    if (e.key.keysym.sym == SDLK_SPACE && !cam.isCrouching) {
+                        if (isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                            cam.vy = config.jumpForce;
+                        }
                     }
-                }
-                // <<< И F-КЛАВИШИ! >>>
-                if (e.key.keysym.sym == SDLK_F1) show_editor = !show_editor;
-                if (e.key.keysym.sym == SDLK_F3) g_showProfiler = !g_showProfiler;
-                break;
+                    // F-КЛАВИШИ
+                    if (e.key.keysym.sym == SDLK_F1) show_editor = !show_editor;
+                    if (e.key.keysym.sym == SDLK_F3) g_showProfiler = !g_showProfiler;
+                    break;
+                    
+                case STATE_IN_GAME_MP:
+                    if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        shutdown_multiplayer();
+                        g_currentState = STATE_MULTIPLAYER_MENU;
+                        SDL_SetRelativeMouseMode(SDL_FALSE);
+                    }
+                    // Здесь будет логика мультиплеера
+                    break;
             }
         }
-         if (g_currentState == STATE_IN_GAME && e.type == SDL_MOUSEMOTION) {
+        
+        // Обработка движения мыши только в синглплеере
+        if ((g_currentState == STATE_IN_GAME_SP || g_currentState == STATE_IN_GAME_MP) && e.type == SDL_MOUSEMOTION) {
             cam.rotY += e.motion.xrel * config.mouseSensitivity;
             cam.rotX -= e.motion.yrel * config.mouseSensitivity;
             if (cam.rotX > 1.5f) cam.rotX = 1.5f;
             if (cam.rotX < -1.5f) cam.rotX = -1.5f;
         }
     }
-        Profiler_End(PROF_OTHER);
-        Profiler_Start(PROF_PHYSICS_COLLISIONS);
-        
+    
+    Profiler_End(PROF_OTHER);
+    Profiler_Start(PROF_PHYSICS_COLLISIONS);
+    
+    // Обновление физики только в игре
+    if (g_currentState == STATE_IN_GAME_SP) {
         for (int i = 0; i < g_numPickups; i++) {
-    updatePickupPhysics(&g_pickups[i], deltaTime, collisionBoxes, numCollisionBoxes, &cam);
-}
-updateShards(deltaTime);
+            updatePickupPhysics(&g_pickups[i], deltaTime, collisionBoxes, numCollisionBoxes, &cam);
+        }
+        updateShards(deltaTime);
+    }
 
-switch (g_currentState) {
+    // --- ОСНОВНАЯ ЛОГИКА И ОТРИСОВКА ПО СОСТОЯНИЯМ ---
+    switch (g_currentState) {
         case STATE_MAIN_MENU:
             g_menuRhombusAngle += deltaTime * 2.0f;
             drawMainMenu(ren, large_font);
             break;
+            
+        case STATE_MULTIPLAYER_MENU:
+                drawMultiplayerMenu(ren, large_font);
+                break;
+
         case STATE_SETTINGS:
             drawSettingsMenu(ren, font, editorVars, numEditorVars);
             break;
-        case STATE_IN_GAME:
-        g_fov = config.fov;
-        
-        cam.isCrouching = keyState[SDL_SCANCODE_LCTRL];
-        
-        if (cam.isCrouching) {
-            cam.targetHeight = CROUCHING_HEIGHT;
-        } else {
-            cam.targetHeight = STANDING_HEIGHT;
-        }
-        
-        cam.height = lerp(cam.height, cam.targetHeight, deltaTime * CROUCH_LERP_SPEED);
-        
-        cam.isRunning = (keyState[SDL_SCANCODE_LSHIFT] || keyState[SDL_SCANCODE_RSHIFT]) && !cam.isCrouching;
-
-        float crouchSpeedMultiplier = config.crouchSpeedMultiplier;
-        float walkSpeed = config.walkSpeed;
-        float runSpeed = config.runSpeed;
-        
-        float moveSpeed = cam.isRunning ? runSpeed : walkSpeed;
-        if (cam.isCrouching) {
-            moveSpeed *= crouchSpeedMultiplier;
-        }
-        
-        cam.targetVx = 0;
-        cam.targetVz = 0;
-        float forwardX = fast_sin(cam.rotY); float forwardZ = fast_cos(cam.rotY);
-        float rightX = fast_cos(cam.rotY); float rightZ = -fast_sin(cam.rotY);
-        if (keyState[SDL_SCANCODE_W]) { cam.targetVx += forwardX * moveSpeed; cam.targetVz += forwardZ * moveSpeed; }
-        if (keyState[SDL_SCANCODE_S]) { cam.targetVx -= forwardX * moveSpeed; cam.targetVz -= forwardZ * moveSpeed; }
-        if (keyState[SDL_SCANCODE_A]) { cam.targetVx -= rightX * moveSpeed; cam.targetVz -= rightZ * moveSpeed; }
-        if (keyState[SDL_SCANCODE_D]) { cam.targetVx += rightX * moveSpeed; cam.targetVz += rightZ * moveSpeed; }
-        
-        // --- НОВЫЙ БЛОК ДВИЖЕНИЯ С ИНЕРЦИЕЙ ---
-        if (!g_cinematic.isActive) {
-        // Сначала проверяем, стоит ли камера на земле
-        int grounded = isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes);
-
-        if (grounded) {
-            // --- ЛОГИКА ДВИЖЕНИЯ НА ЗЕМЛЕ (как было раньше) ---
-            // Быстрое ускорение и резкое торможение для отзывчивости
-            float accel = cam.isRunning ? config.acceleration * 1.2f : config.acceleration;
-            float decel = config.deceleration;
-
-            if (fabsf(cam.targetVx) > 0.001f || fabsf(cam.targetVz) > 0.001f) {
-                // Если нажаты клавиши - ускоряемся к целевой скорости
-                cam.vx = lerp(cam.vx, cam.targetVx, deltaTime * accel);
-                cam.vz = lerp(cam.vz, cam.targetVz, deltaTime * accel);
-            } else {
-                // Если клавиши отпущены - быстро тормозим
-                cam.vx = lerp(cam.vx, 0, deltaTime * decel);
-                cam.vz = lerp(cam.vz, 0, deltaTime * decel);
-            }
-        } else {
-            // --- ЛОГИКА ДВИЖЕНИЯ В ВОЗДУХЕ (новая) ---
-            // Слабый контроль и очень медленное торможение для сохранения инерции
             
-            if (fabsf(cam.targetVx) > 0.001f || fabsf(cam.targetVz) > 0.001f) {
-                // Если в полете нажаты клавиши - лишь СЛЕГКА меняем траекторию
-                cam.vx = lerp(cam.vx, cam.targetVx, deltaTime * AIR_ACCELERATION);
-                cam.vz = lerp(cam.vz, cam.targetVz, deltaTime * AIR_ACCELERATION);
+        case STATE_IN_GAME_SP:
+            // --- ВСЯ ИГРОВАЯ ЛОГИКА ДЛЯ СИНГЛПЛЕЕРА ---
+            g_fov = config.fov;
+            
+            cam.isCrouching = keyState[SDL_SCANCODE_LCTRL];
+            
+            if (cam.isCrouching) {
+                cam.targetHeight = CROUCHING_HEIGHT;
             } else {
-                // Если клавиши отпущены - скорость почти не гасится (ИНЕРЦИЯ!)
-                cam.vx = lerp(cam.vx, 0, deltaTime * AIR_DECELERATION);
-                cam.vz = lerp(cam.vz, 0, deltaTime * AIR_DECELERATION);
+                cam.targetHeight = STANDING_HEIGHT;
             }
-        }
-        
-        float newX = cam.x + cam.vx * deltaTime * 60.0f;
-        float newZ = cam.z + cam.vz * deltaTime * 60.0f;
+            
+            cam.height = lerp(cam.height, cam.targetHeight, deltaTime * CROUCH_LERP_SPEED);
+            
+            cam.isRunning = (keyState[SDL_SCANCODE_LSHIFT] || keyState[SDL_SCANCODE_RSHIFT]) && !cam.isCrouching;
 
-        if (!checkWallCollision(newX, cam.y, cam.z, playerRadius, collisionBoxes, numCollisionBoxes)) {
-            cam.x = newX;
-        } else {
-            if (!checkWallCollision(cam.x, cam.y, newZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
-                cam.vx = 0;
+            float crouchSpeedMultiplier = config.crouchSpeedMultiplier;
+            float walkSpeed = config.walkSpeed;
+            float runSpeed = config.runSpeed;
+            
+            float moveSpeed = cam.isRunning ? runSpeed : walkSpeed;
+            if (cam.isCrouching) {
+                moveSpeed *= crouchSpeedMultiplier;
             }
-        }
+            
+            cam.targetVx = 0;
+            cam.targetVz = 0;
+            float forwardX = fast_sin(cam.rotY); 
+            float forwardZ = fast_cos(cam.rotY);
+            float rightX = fast_cos(cam.rotY); 
+            float rightZ = -fast_sin(cam.rotY);
+            
+            if (keyState[SDL_SCANCODE_W]) { 
+                cam.targetVx += forwardX * moveSpeed; 
+                cam.targetVz += forwardZ * moveSpeed; 
+            }
+            if (keyState[SDL_SCANCODE_S]) { 
+                cam.targetVx -= forwardX * moveSpeed; 
+                cam.targetVz -= forwardZ * moveSpeed; 
+            }
+            if (keyState[SDL_SCANCODE_A]) { 
+                cam.targetVx -= rightX * moveSpeed; 
+                cam.targetVz -= rightZ * moveSpeed; 
+            }
+            if (keyState[SDL_SCANCODE_D]) { 
+                cam.targetVx += rightX * moveSpeed; 
+                cam.targetVz += rightZ * moveSpeed; 
+            }
+            
+            // --- БЛОК ДВИЖЕНИЯ С ИНЕРЦИЕЙ ---
+            if (!g_cinematic.isActive) {
+                // Сначала проверяем, стоит ли камера на земле
+                int grounded = isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes);
 
-        if (!checkWallCollision(cam.x, cam.y, newZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
-            cam.z = newZ;
-        } else {
-            if (!checkWallCollision(newX, cam.y, cam.z, playerRadius, collisionBoxes, numCollisionBoxes)) {
-                cam.vz = 0;
-            }
-        }
-        
-        cam.vy -= config.gravity * deltaTime;
-        
-        float newY = cam.y + cam.vy * deltaTime * 60.0f;
-        
-        if (cam.vy > 0) {
-            if (!checkCollision(cam.x, newY + cam.height, cam.z, playerRadius, collisionBoxes, numCollisionBoxes)) {
-                cam.y = newY;
-            } else {
-                cam.vy = 0;
-            }
-        } else {
-            if (newY <= 0) {
-                cam.y = 0;
-                if (cam.vy < -0.2f) {
-                    cam.currentBobY -= fabsf(cam.vy) * 0.15f;
+                if (grounded) {
+                    // ЛОГИКА ДВИЖЕНИЯ НА ЗЕМЛЕ
+                    float accel = cam.isRunning ? config.acceleration * 1.2f : config.acceleration;
+                    float decel = config.deceleration;
+
+                    if (fabsf(cam.targetVx) > 0.001f || fabsf(cam.targetVz) > 0.001f) {
+                        // Если нажаты клавиши - ускоряемся к целевой скорости
+                        cam.vx = lerp(cam.vx, cam.targetVx, deltaTime * accel);
+                        cam.vz = lerp(cam.vz, cam.targetVz, deltaTime * accel);
+                    } else {
+                        // Если клавиши отпущены - быстро тормозим
+                        cam.vx = lerp(cam.vx, 0, deltaTime * decel);
+                        cam.vz = lerp(cam.vz, 0, deltaTime * decel);
+                    }
+                } else {
+                    // ЛОГИКА ДВИЖЕНИЯ В ВОЗДУХЕ
+                    if (fabsf(cam.targetVx) > 0.001f || fabsf(cam.targetVz) > 0.001f) {
+                        // Если в полете нажаты клавиши - лишь СЛЕГКА меняем траекторию
+                        cam.vx = lerp(cam.vx, cam.targetVx, deltaTime * AIR_ACCELERATION);
+                        cam.vz = lerp(cam.vz, cam.targetVz, deltaTime * AIR_ACCELERATION);
+                    } else {
+                        // Если клавиши отпущены - скорость почти не гасится (ИНЕРЦИЯ!)
+                        cam.vx = lerp(cam.vx, 0, deltaTime * AIR_DECELERATION);
+                        cam.vz = lerp(cam.vz, 0, deltaTime * AIR_DECELERATION);
+                    }
                 }
-                cam.vy = 0;
-            } else {
-                int foundGround;
-                float groundHeight = getGroundHeight(cam.x, cam.z, playerRadius, collisionBoxes, numCollisionBoxes, &foundGround);
                 
-                if (foundGround) {
-                    float targetY = groundHeight + playerRadius;
-                    
-                    if (newY <= targetY && cam.y > targetY - 0.5f) {
-                        cam.y = targetY;
+                float newX = cam.x + cam.vx * deltaTime * 60.0f;
+                float newZ = cam.z + cam.vz * deltaTime * 60.0f;
+
+                if (!checkWallCollision(newX, cam.y, cam.z, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                    cam.x = newX;
+                } else {
+                    if (!checkWallCollision(cam.x, cam.y, newZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                        cam.vx = 0;
+                    }
+                }
+
+                if (!checkWallCollision(cam.x, cam.y, newZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                    cam.z = newZ;
+                } else {
+                    if (!checkWallCollision(newX, cam.y, cam.z, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                        cam.vz = 0;
+                    }
+                }
+                
+                cam.vy -= config.gravity * deltaTime;
+                
+                float newY = cam.y + cam.vy * deltaTime * 60.0f;
+                
+                if (cam.vy > 0) {
+                    if (!checkCollision(cam.x, newY + cam.height, cam.z, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                        cam.y = newY;
+                    } else {
+                        cam.vy = 0;
+                    }
+                } else {
+                    if (newY <= 0) {
+                        cam.y = 0;
                         if (cam.vy < -0.2f) {
                             cam.currentBobY -= fabsf(cam.vy) * 0.15f;
                         }
                         cam.vy = 0;
-                    } else if (newY > targetY || !foundGround) {
-                        cam.y = newY;
+                    } else {
+                        int foundGround;
+                        float groundHeight = getGroundHeight(cam.x, cam.z, playerRadius, collisionBoxes, numCollisionBoxes, &foundGround);
+                        
+                        if (foundGround) {
+                            float targetY = groundHeight + playerRadius;
+                            
+                            if (newY <= targetY && cam.y > targetY - 0.5f) {
+                                cam.y = targetY;
+                                if (cam.vy < -0.2f) {
+                                    cam.currentBobY -= fabsf(cam.vy) * 0.15f;
+                                }
+                                cam.vy = 0;
+                            } else if (newY > targetY || !foundGround) {
+                                cam.y = newY;
+                            }
+                        } else {
+                            cam.y = newY;
+                        }
                     }
-                } else {
-                    cam.y = newY;
                 }
-            }
-        }
-        
-        if ((fabsf(cam.vx) > 0.01f || fabsf(cam.vz) > 0.01f) && isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
-            float checkDist = 0.5f;
-            float checkX = cam.x + (cam.vx > 0 ? checkDist : -checkDist) * (fabsf(cam.vx) > 0.01f ? 1 : 0);
-            float checkZ = cam.z + (cam.vz > 0 ? checkDist : -checkDist) * (fabsf(cam.vz) > 0.01f ? 1 : 0);
-            
-            if (checkWallCollision(checkX, cam.y, checkZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
-                float stepUpHeight = 0.6f;
                 
-                if (!checkWallCollision(checkX, cam.y + stepUpHeight, checkZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
-                    int foundGround;
-                    float groundAhead = getGroundHeight(checkX, checkZ, playerRadius, collisionBoxes, numCollisionBoxes, &foundGround);
+                // Автоматический подъем на ступеньки
+                if ((fabsf(cam.vx) > 0.01f || fabsf(cam.vz) > 0.01f) && isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                    float checkDist = 0.5f;
+                    float checkX = cam.x + (cam.vx > 0 ? checkDist : -checkDist) * (fabsf(cam.vx) > 0.01f ? 1 : 0);
+                    float checkZ = cam.z + (cam.vz > 0 ? checkDist : -checkDist) * (fabsf(cam.vz) > 0.01f ? 1 : 0);
                     
-                    if (foundGround && groundAhead > cam.y - playerRadius && groundAhead < cam.y + stepUpHeight) {
-                        cam.y = lerp(cam.y, groundAhead + playerRadius, deltaTime * 8.0f);
+                    if (checkWallCollision(checkX, cam.y, checkZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                        float stepUpHeight = 0.6f;
+                        
+                        if (!checkWallCollision(checkX, cam.y + stepUpHeight, checkZ, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                            int foundGround;
+                            float groundAhead = getGroundHeight(checkX, checkZ, playerRadius, collisionBoxes, numCollisionBoxes, &foundGround);
+                            
+                            if (foundGround && groundAhead > cam.y - playerRadius && groundAhead < cam.y + stepUpHeight) {
+                                cam.y = lerp(cam.y, groundAhead + playerRadius, deltaTime * 8.0f);
+                            }
+                        }
                     }
                 }
             }
-        }
-        }
 
-        updateCameraBob(&cam, deltaTime);
+            updateCameraBob(&cam, deltaTime);
 
-        // Обновляем состояние и анимацию рук
-        updateHandsState(&cam, deltaTime);
-        updateHandsAnimation(&cam, deltaTime);
-        updateGravityGlove(&cam, deltaTime);
+            // Обновляем состояние и анимацию рук
+            updateHandsState(&cam, deltaTime);
+            updateHandsAnimation(&cam, deltaTime);
+            updateGravityGlove(&cam, deltaTime);
 
-        Profiler_End(PROF_PHYSICS_COLLISIONS);
-        Profiler_Start(PROF_GAME_LOGIC);
+            Profiler_End(PROF_PHYSICS_COLLISIONS);
+            Profiler_Start(PROF_GAME_LOGIC);
 
-        
-        updatePhone(deltaTime);
-        updateDayNightCycle(deltaTime, cam);
-        updateWorldEvolution(deltaTime);
-        updateAirstrike(deltaTime, &cam);
+            updatePhone(deltaTime);
+            updateDayNightCycle(deltaTime, cam);
+            updateWorldEvolution(deltaTime);
+            updateAirstrike(deltaTime, &cam);
 
-        if (g_bossFightActive) {
-        updateBoss(deltaTime, &cam);
-        updateGlitches(deltaTime, &cam);
-    }
-        
-        // ДОБАВЛЯЕМ: Обновляем монеты и проверяем сбор
-        updateCoins(deltaTime);
-        checkCoinCollection(&cam);
-        
-        updateQuestSystem(&questSystem, &cam, playerRadius);
-        // ИСПРАВЛЯЕМ: Передаём collisionBoxes в функцию проверки целей
-        checkQuestObjectives(&questSystem, &cam, collisionBoxes, numCollisionBoxes);
-
-        Profiler_End(PROF_GAME_LOGIC);
-    Profiler_Start(PROF_RENDERING);
-        Uint8 bgR = 20 + (Uint8)(g_worldEvolution.transitionProgress * 20);
-Uint8 bgG = 20 + (Uint8)(g_worldEvolution.transitionProgress * 25);
-Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
-
-        // Определяем цвет фона (как и было)
-        const SDL_Color baseBackgroundColor = {20, 20, 30, 255}; 
-        SDL_Color targetBackgroundColor = g_dayNight.fogColor;
-        SDL_Color finalClearColor = lerpColor(baseBackgroundColor, targetBackgroundColor, g_worldEvolution.skyboxAlpha);
-        SDL_SetRenderDrawColor(ren, finalClearColor.r, finalClearColor.g, finalClearColor.b, 255);
-        SDL_RenderClear(ren);
-        clearZBuffer();
-
-        // Выбираем, какую камеру использовать для рендера
-        Camera renderCam = cam;
-
-        // 2. Применяем эффекты покачивания и тряски к этой временной камере
-        renderCam.y += cam.currentBobY;
-        renderCam.rotY += cam.currentBobX * 0.02f;
-        if (g_cinematic.isActive) {
-            g_cinematic.fov = lerp(g_cinematic.fov, 150.0f, deltaTime * 2.0f); // Зум
-            
-            Camera cinematicRenderCam = {0};
-            cinematicRenderCam.x = g_cinematic.position.x;
-            cinematicRenderCam.y = g_cinematic.position.y;
-            cinematicRenderCam.z = g_cinematic.position.z;
-            
-            float dx = g_cinematic.target.x - cinematicRenderCam.x;
-            float dy = g_cinematic.target.y - cinematicRenderCam.y;
-            float dz = g_cinematic.target.z - cinematicRenderCam.z;
-            cinematicRenderCam.rotY = atan2f(dx, dz);
-            cinematicRenderCam.rotX = -atan2f(dy, sqrtf(dx*dx + dz*dz));
-            
-            renderCam = cinematicRenderCam;
-            g_fov = g_cinematic.fov; // Временно меняем FOV
-        } else {
-             g_fov = config.fov;
-        }
-
-        // 3. Передаем renderCam ВО ВСЕ ФУНКЦИИ ОТРИСОВКИ
-        drawSkybox(ren);
-        drawSunAndMoon(ren, renderCam); 
-
-        drawFloor(ren, renderCam);
-        
-        // ОТРИСОВКА ПЛАТФОРМ С ОТСЕЧЕНИЕМ
-for (int i = 0; i < numCollisionBoxes; i++) {
-    // <<< ВОТ ОНО! Рисуем только то, что в кадре. >>>
-    if (isBoxInFrustum_Improved(&collisionBoxes[i], renderCam)) {
-        drawOptimizedBox(ren, &collisionBoxes[i], renderCam);
-    }
-}
-
-drawEvolvingWalls(ren, renderCam); // Для этого отсечение не так важно
-
-// ОТРИСОВКА МОНЕТ С ОТСЕЧЕНИЕМ
-for (int i = 0; i < g_numCoins; i++) {
-    if (!g_coins[i].collected) {
-        // <<< И здесь тоже! Отсекаем по простой точке >>>
-        if (isPointInFrustum(g_coins[i].pos, renderCam)) {
-            drawCoin(ren, &g_coins[i], renderCam);
-        }
-    }
-}
-
-// ОТРИСОВКА ПРЕДМЕТОВ С ОТСЕЧЕНИЕМ
-for (int i = 0; i < g_numPickups; i++) {
-    if (g_pickups[i].state != PICKUP_STATE_BROKEN) {
-        // <<< И здесь! >>>
-        if (isPointInFrustum(g_pickups[i].pos, renderCam)) {
-            drawPickupObject(ren, &g_pickups[i], renderCam);
-        }
-    }
-}
-        // [НОВЫЙ КОД] Рассчитываем траекторию, если держим объект
-        if (g_hands.heldObject && rightMouseButtonHeld) {
-            calculateTrajectory(&cam, g_hands.currentThrowPower, &g_trajectory, collisionBoxes, numCollisionBoxes, config.gravity);
-        } else {
-            g_trajectory.numPoints = 0; // Прячем траекторию
-        }
-
-        // [НОВЫЙ КОД] Отрисовка луча прицеливания
-        if (g_hands.currentState == HAND_STATE_AIMING) {
-            Vec3 rayStart = {cam.x, cam.y + cam.height, cam.z};
-            Vec3 rayDir = {fast_sin(cam.rotY)*fast_cos(cam.rotX), -fast_sin(cam.rotX), fast_cos(cam.rotY)*fast_cos(cam.rotX)};
-            rayDir = normalize(rayDir);
-
-            float rayLen = g_hands.targetedObject ? 
-                sqrtf(powf(g_hands.targetedObject->pos.x - rayStart.x, 2)) : // сокращенное расстояние до объекта
-                RAYCAST_MAX_DISTANCE;
-            
-            Vec3 rayEnd = {rayStart.x + rayDir.x * rayLen, rayStart.y + rayDir.y * rayLen, rayStart.z + rayDir.z * rayLen};
-            clipAndDrawLine(ren, rayStart, rayEnd, cam, (SDL_Color){255,165,0,100});
-        }
-
-        // Рендерим авиаудар
-        if (g_airstrike.isActive) {
-            for (int i = 0; i < 3; i++) {
-                drawJet(ren, &g_airstrike.jets[i], renderCam);
-                drawBomb(ren, &g_airstrike.bombs[i], renderCam);
-                drawExplosion(ren, &g_airstrike.explosions[i], renderCam);
+            if (g_bossFightActive) {
+                updateBoss(deltaTime, &cam);
+                updateGlitches(deltaTime, &cam);
             }
-        }
+            
+            // Обновляем монеты и проверяем сбор
+            updateCoins(deltaTime);
+            checkCoinCollection(&cam);
+            
+            updateQuestSystem(&questSystem, &cam, playerRadius);
+            checkQuestObjectives(&questSystem, &cam, collisionBoxes, numCollisionBoxes);
 
-        drawGlassShards(ren, renderCam);
-        applyGlitchEffect(ren);
-        drawGlitches(ren, renderCam);
-        drawBoss(ren, renderCam);
-        drawTrajectory(ren,renderCam, &g_trajectory);
-        //drawHands(ren, renderCam);
-        
-        float lightAngle = SDL_GetTicks() * 0.0003f;
-        Vec3 lightDir = normalize((Vec3){fast_cos(lightAngle) * 1.5f, 2, fast_sin(lightAngle) * 1.5f});
-        for (int i = 0; i < 12; ++i) {
-            float b1 = dot(faceNormals[edgeFaces[i][0]], lightDir);
-            float b2 = dot(faceNormals[edgeFaces[i][1]], lightDir);
-            float brightness = fmaxf(0.4f, fmaxf(b1, b2));
-            int c = (int)(brightness * 255);
-            if (c > 255) c = 255;
-            if (c < 60) c = 60;
-            SDL_Color edgeColor = {(Uint8)c, (Uint8)c, (Uint8)c, 255};
+            Profiler_End(PROF_GAME_LOGIC);
+            Profiler_Start(PROF_RENDERING);
+            
+            // --- ОТРИСОВКА СИНГЛПЛЕЕРА ---
+            Uint8 bgR = 20 + (Uint8)(g_worldEvolution.transitionProgress * 20);
+            Uint8 bgG = 20 + (Uint8)(g_worldEvolution.transitionProgress * 25);
+            Uint8 bgB = 30 + (Uint8)(g_worldEvolution.transitionProgress * 30);
 
-            Vec3 p1 = cube[edges[i][0]];
-            Vec3 p2 = cube[edges[i][1]];
-            clipAndDrawLine(ren, p1, p2, renderCam, edgeColor);
-        }
+            // Определяем цвет фона
+            const SDL_Color baseBackgroundColor = {20, 20, 30, 255}; 
+            SDL_Color targetBackgroundColor = g_dayNight.fogColor;
+            SDL_Color finalClearColor = lerpColor(baseBackgroundColor, targetBackgroundColor, g_worldEvolution.skyboxAlpha);
+            SDL_SetRenderDrawColor(ren, finalClearColor.r, finalClearColor.g, finalClearColor.b, 255);
+            SDL_RenderClear(ren);
+            clearZBuffer();
 
-        Profiler_End(PROF_RENDERING);
+            // Выбираем, какую камеру использовать для рендера
+            Camera renderCam = cam;
 
-    // --- PROFILER: Начинаем снова замер "прочего" времени (для UI) ---
-    Profiler_Start(PROF_OTHER);
-
-        if (show_editor) {
-            char evolutionStatus[128];
-            const char* stateName[] = {
-                "WIREFRAME", "GRID GROWING", "CUBE COMPLETE",
-                "MATERIALIZING", "TEXTURED", "REALISTIC"
-            };
-            snprintf(evolutionStatus, 128, "Evolution: %s (%.0f%%)",
-                    stateName[g_worldEvolution.currentState],
-                    g_worldEvolution.transitionProgress * 100);
-            SDL_Color cyan = {0, 255, 255, 255};
-            drawText(ren, font, evolutionStatus, WIDTH/2 - 100, 10, cyan);
-        }
-
-        drawQuestConnections(ren, &questSystem, renderCam, SDL_GetTicks() * 0.001f);
-        for (int i = 0; i < questSystem.numNodes; i++) {
-            drawQuestNode(ren, &questSystem.nodes[i], renderCam, SDL_GetTicks() * 0.001f);
-        }
-        
-        if (cam.isRunning && cam.isMoving) {
-            SDL_SetRenderDrawColor(ren, 255, 100, 100, 255);
-            SDL_Rect runIndicator = {10, 10, 20, 20};
-            SDL_RenderFillRect(ren, &runIndicator);
-        }
-        
-        if (show_editor) {
-            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
-            SDL_Rect bgRect = { 10, 10, 300, numEditorVars * 20 + 10 };
-            SDL_RenderFillRect(ren, &bgRect);
-
-            SDL_Color white = {255, 255, 255, 255};
-            SDL_Color yellow = {255, 255, 0, 255};
-
-            for (int i = 0; i < numEditorVars; ++i) {
-                char buffer[128];
-                snprintf(buffer, 128, "%s %s: %.4f", 
-                         (i == selected_item) ? ">" : " ",
-                         editorVars[i].name,
-                         *editorVars[i].value_ptr);
+            // Применяем эффекты покачивания и тряски к этой временной камере
+            renderCam.y += cam.currentBobY;
+            renderCam.rotY += cam.currentBobX * 0.02f;
+            
+            if (g_cinematic.isActive) {
+                g_cinematic.fov = lerp(g_cinematic.fov, 150.0f, deltaTime * 2.0f); // Зум
                 
-                drawText(ren, font, buffer, 20, 15 + i * 20, (i == selected_item) ? yellow : white);
+                Camera cinematicRenderCam = {0};
+                cinematicRenderCam.x = g_cinematic.position.x;
+                cinematicRenderCam.y = g_cinematic.position.y;
+                cinematicRenderCam.z = g_cinematic.position.z;
+                
+                float dx = g_cinematic.target.x - cinematicRenderCam.x;
+                float dy = g_cinematic.target.y - cinematicRenderCam.y;
+                float dz = g_cinematic.target.z - cinematicRenderCam.z;
+                cinematicRenderCam.rotY = atan2f(dx, dz);
+                cinematicRenderCam.rotX = -atan2f(dy, sqrtf(dx*dx + dz*dz));
+                
+                renderCam = cinematicRenderCam;
+                g_fov = g_cinematic.fov; // Временно меняем FOV
+            } else {
+                g_fov = config.fov;
             }
-        }
 
-        Profiler_Draw(ren, font);
-        drawQuestUI(ren, font, &questSystem);
-
-        for (int i = 0; i < questSystem.numNodes; i++) {
-            QuestNode* node = &questSystem.nodes[i];
-            float dist = sqrtf(powf(cam.x - node->worldPos.x, 2) +
-                            powf(cam.y - node->worldPos.y, 2) +
-                            powf(cam.z - node->worldPos.z, 2));
+            // Передаем renderCam ВО ВСЕ ФУНКЦИИ ОТРИСОВКИ
+            drawSkybox(ren);
+            drawSunAndMoon(ren, renderCam); 
+            drawFloor(ren, renderCam);
             
-            if (dist < 2.0f && node->status == QUEST_AVAILABLE) {
-                SDL_Color white = {255, 255, 255, 255};
-                drawText(ren, font, "Press [E] to accept quest", WIDTH/2 - 100, HEIGHT - 50, white);
-                break;
+            // ОТРИСОВКА ПЛАТФОРМ С ОТСЕЧЕНИЕМ
+            for (int i = 0; i < numCollisionBoxes; i++) {
+                if (isBoxInFrustum_Improved(&collisionBoxes[i], renderCam)) {
+                    drawOptimizedBox(ren, &collisionBoxes[i], renderCam);
+                }
             }
-        }
-        Profiler_End(PROF_OTHER);
-        Profiler_Update();
-        drawPhone(ren, font);
 
-        if (g_phone.state == PHONE_STATE_VISIBLE || g_phone.state == PHONE_STATE_SHOWING) {
-             const int phoneWidth = 250, phoneHeight = 500;
-             int currentY = (int)lerp((float)HEIGHT, (float)(HEIGHT - phoneHeight - 50), g_phone.animationProgress);
+            drawEvolvingWalls(ren, renderCam);
 
-             SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-             SDL_SetRenderDrawColor(ren, 25, 25, 30, 230);
-             SDL_Rect phoneBody = { WIDTH - phoneWidth - 50, currentY, phoneWidth, phoneHeight };
-             SDL_RenderFillRect(ren, &phoneBody);
-             
-             SDL_Color textColor = {200, 200, 200, 255};
-             SDL_Color selectedColor = {255, 255, 0, 255};
-             drawText(ren, font, "DEMOCRACY OS", phoneBody.x + 20, phoneBody.y + 20, textColor);
-             drawText(ren, font, "> Вызвать демократию", phoneBody.x + 30, phoneBody.y + 70, selectedColor);
-        }
-        
-        // Кинематографичные полосы
-        if (g_cinematic.isActive) {
-            int barHeight = HEIGHT / 8;
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-            SDL_Rect topBar = {0, 0, WIDTH, barHeight};
-            SDL_Rect bottomBar = {0, HEIGHT - barHeight, WIDTH, barHeight};
-            SDL_RenderFillRect(ren, &topBar);
-            SDL_RenderFillRect(ren, &bottomBar);
-        }
-        break;
+            // ОТРИСОВКА МОНЕТ С ОТСЕЧЕНИЕМ
+            for (int i = 0; i < g_numCoins; i++) {
+                if (!g_coins[i].collected) {
+                    if (isPointInFrustum(g_coins[i].pos, renderCam)) {
+                        drawCoin(ren, &g_coins[i], renderCam);
+                    }
+                }
+            }
+
+            // ОТРИСОВКА ПРЕДМЕТОВ С ОТСЕЧЕНИЕМ
+            for (int i = 0; i < g_numPickups; i++) {
+                if (g_pickups[i].state != PICKUP_STATE_BROKEN) {
+                    if (isPointInFrustum(g_pickups[i].pos, renderCam)) {
+                        drawPickupObject(ren, &g_pickups[i], renderCam);
+                    }
+                }
+            }
+            
+            // Рассчитываем траекторию, если держим объект
+            if (g_hands.heldObject && rightMouseButtonHeld) {
+                calculateTrajectory(&cam, g_hands.currentThrowPower, &g_trajectory, collisionBoxes, numCollisionBoxes, config.gravity);
+            } else {
+                g_trajectory.numPoints = 0; // Прячем траекторию
+            }
+
+            // Отрисовка луча прицеливания
+            if (g_hands.currentState == HAND_STATE_AIMING) {
+                Vec3 rayStart = {cam.x, cam.y + cam.height, cam.z};
+                Vec3 rayDir = {fast_sin(cam.rotY)*fast_cos(cam.rotX), -fast_sin(cam.rotX), fast_cos(cam.rotY)*fast_cos(cam.rotX)};
+                rayDir = normalize(rayDir);
+
+                float rayLen = g_hands.targetedObject ? 
+                    sqrtf(powf(g_hands.targetedObject->pos.x - rayStart.x, 2)) :
+                    RAYCAST_MAX_DISTANCE;
+                
+                Vec3 rayEnd = {rayStart.x + rayDir.x * rayLen, rayStart.y + rayDir.y * rayLen, rayStart.z + rayDir.z * rayLen};
+                clipAndDrawLine(ren, rayStart, rayEnd, cam, (SDL_Color){255,165,0,100});
+            }
+
+            // Рендерим авиаудар
+            if (g_airstrike.isActive) {
+                for (int i = 0; i < 3; i++) {
+                    drawJet(ren, &g_airstrike.jets[i], renderCam);
+                    drawBomb(ren, &g_airstrike.bombs[i], renderCam);
+                    drawExplosion(ren, &g_airstrike.explosions[i], renderCam);
+                }
+            }
+
+            drawGlassShards(ren, renderCam);
+            applyGlitchEffect(ren);
+            drawGlitches(ren, renderCam);
+            drawBoss(ren, renderCam);
+            drawTrajectory(ren, renderCam, &g_trajectory);
+            
+            // Отрисовка куба с освещением
+            float lightAngle = SDL_GetTicks() * 0.0003f;
+            Vec3 lightDir = normalize((Vec3){fast_cos(lightAngle) * 1.5f, 2, fast_sin(lightAngle) * 1.5f});
+            for (int i = 0; i < 12; ++i) {
+                float b1 = dot(faceNormals[edgeFaces[i][0]], lightDir);
+                float b2 = dot(faceNormals[edgeFaces[i][1]], lightDir);
+                float brightness = fmaxf(0.4f, fmaxf(b1, b2));
+                int c = (int)(brightness * 255);
+                if (c > 255) c = 255;
+                if (c < 60) c = 60;
+                SDL_Color edgeColor = {(Uint8)c, (Uint8)c, (Uint8)c, 255};
+
+                Vec3 p1 = cube[edges[i][0]];
+                Vec3 p2 = cube[edges[i][1]];
+                clipAndDrawLine(ren, p1, p2, renderCam, edgeColor);
+            }
+
+            Profiler_End(PROF_RENDERING);
+
+            // --- PROFILER: Начинаем снова замер "прочего" времени (для UI) ---
+            Profiler_Start(PROF_OTHER);
+
+            if (show_editor) {
+                char evolutionStatus[128];
+                const char* stateName[] = {
+                    "WIREFRAME", "GRID GROWING", "CUBE COMPLETE",
+                    "MATERIALIZING", "TEXTURED", "REALISTIC"
+                };
+                snprintf(evolutionStatus, 128, "Evolution: %s (%.0f%%)",
+                        stateName[g_worldEvolution.currentState],
+                        g_worldEvolution.transitionProgress * 100);
+                SDL_Color cyan = {0, 255, 255, 255};
+                drawText(ren, font, evolutionStatus, WIDTH/2 - 100, 10, cyan);
+            }
+
+            drawQuestConnections(ren, &questSystem, renderCam, SDL_GetTicks() * 0.001f);
+            for (int i = 0; i < questSystem.numNodes; i++) {
+                drawQuestNode(ren, &questSystem.nodes[i], renderCam, SDL_GetTicks() * 0.001f);
+            }
+            
+            if (cam.isRunning && cam.isMoving) {
+                SDL_SetRenderDrawColor(ren, 255, 100, 100, 255);
+                SDL_Rect runIndicator = {10, 10, 20, 20};
+                SDL_RenderFillRect(ren, &runIndicator);
+            }
+            
+            if (show_editor) {
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
+                SDL_Rect bgRect = { 10, 10, 300, numEditorVars * 20 + 10 };
+                SDL_RenderFillRect(ren, &bgRect);
+
+                SDL_Color white = {255, 255, 255, 255};
+                SDL_Color yellow = {255, 255, 0, 255};
+
+                for (int i = 0; i < numEditorVars; ++i) {
+                    char buffer[128];
+                    snprintf(buffer, 128, "%s %s: %.4f", 
+                            (i == selected_item) ? ">" : " ",
+                            editorVars[i].name,
+                            *editorVars[i].value_ptr);
+                    
+                    drawText(ren, font, buffer, 20, 15 + i * 20, (i == selected_item) ? yellow : white);
+                }
+            }
+
+            Profiler_Draw(ren, font);
+            drawQuestUI(ren, font, &questSystem);
+
+            for (int i = 0; i < questSystem.numNodes; i++) {
+                QuestNode* node = &questSystem.nodes[i];
+                float dist = sqrtf(powf(cam.x - node->worldPos.x, 2) +
+                                powf(cam.y - node->worldPos.y, 2) +
+                                powf(cam.z - node->worldPos.z, 2));
+                
+                if (dist < 2.0f && node->status == QUEST_AVAILABLE) {
+                    SDL_Color white = {255, 255, 255, 255};
+                    drawText(ren, font, "Press [E] to accept quest", WIDTH/2 - 100, HEIGHT - 50, white);
+                    break;
+                }
+            }
+            
+            Profiler_End(PROF_OTHER);
+            Profiler_Update();
+            
+            drawPhone(ren, font);
+
+            if (g_phone.state == PHONE_STATE_VISIBLE || g_phone.state == PHONE_STATE_SHOWING) {
+                const int phoneWidth = 250, phoneHeight = 500;
+                int currentY = (int)lerp((float)HEIGHT, (float)(HEIGHT - phoneHeight - 50), g_phone.animationProgress);
+
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(ren, 25, 25, 30, 230);
+                SDL_Rect phoneBody = { WIDTH - phoneWidth - 50, currentY, phoneWidth, phoneHeight };
+                SDL_RenderFillRect(ren, &phoneBody);
+                
+                SDL_Color textColor = {200, 200, 200, 255};
+                SDL_Color selectedColor = {255, 255, 0, 255};
+                drawText(ren, font, "DEMOCRACY OS", phoneBody.x + 20, phoneBody.y + 20, textColor);
+                drawText(ren, font, "> Вызвать демократию", phoneBody.x + 30, phoneBody.y + 70, selectedColor);
+            }
+            
+            // Кинематографичные полосы
+            if (g_cinematic.isActive) {
+                int barHeight = HEIGHT / 8;
+                SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+                SDL_Rect topBar = {0, 0, WIDTH, barHeight};
+                SDL_Rect bottomBar = {0, HEIGHT - barHeight, WIDTH, barHeight};
+                SDL_RenderFillRect(ren, &topBar);
+                SDL_RenderFillRect(ren, &bottomBar);
+            }
+            break;
+            
+        case STATE_IN_GAME_MP:
+            {
+                    // --- ДВИГАЕМ СВОЮ КАМЕРУ ---
+                // <<< ВОТ ОН, ФИКС №1: Мы считываем нажатия клавиш ПЕРЕД тем, как их использовать >>>
+                const Uint8* keyState_mp = SDL_GetKeyboardState(NULL);
+                
+                g_fov = config.fov;
+                cam.isCrouching = keyState_mp[SDL_SCANCODE_LCTRL];
+                cam.targetHeight = cam.isCrouching ? CROUCHING_HEIGHT : STANDING_HEIGHT;
+                cam.height = lerp(cam.height, cam.targetHeight, deltaTime * CROUCH_LERP_SPEED);
+                cam.isRunning = (keyState_mp[SDL_SCANCODE_LSHIFT] || keyState_mp[SDL_SCANCODE_RSHIFT]) && !cam.isCrouching;
+                float moveSpeed = cam.isRunning ? config.runSpeed : config.walkSpeed;
+                if (cam.isCrouching) moveSpeed *= config.crouchSpeedMultiplier;
+
+                cam.targetVx = 0;
+                cam.targetVz = 0;
+                float forwardX = fast_sin(cam.rotY), forwardZ = fast_cos(cam.rotY);
+                float rightX = fast_cos(cam.rotY), rightZ = -fast_sin(cam.rotY);
+                if (keyState_mp[SDL_SCANCODE_W]) { cam.targetVx += forwardX * moveSpeed; cam.targetVz += forwardZ * moveSpeed; }
+                if (keyState_mp[SDL_SCANCODE_S]) { cam.targetVx -= forwardX * moveSpeed; cam.targetVz -= forwardZ * moveSpeed; }
+                if (keyState_mp[SDL_SCANCODE_A]) { cam.targetVx -= rightX * moveSpeed; cam.targetVz -= rightZ * moveSpeed; }
+                if (keyState_mp[SDL_SCANCODE_D]) { cam.targetVx += rightX * moveSpeed; cam.targetVz += rightZ * moveSpeed; }
+                
+                cam.vx = lerp(cam.vx, cam.targetVx, deltaTime * config.acceleration);
+                cam.vz = lerp(cam.vz, cam.targetVz, deltaTime * config.deceleration);
+                float newX = cam.x + cam.vx * deltaTime * 60.0f;
+                float newZ = cam.z + cam.vz * deltaTime * 60.0f;
+                cam.x = newX; // В мультиплеере пока нет коллизий
+                cam.z = newZ;
+                // <<< КОНЕЦ БЛОКА ДВИЖЕНИЯ >>>
+
+                // --- ЛОГИКА МУЛЬТИПЛЕЕРА ---
+                update_multiplayer(&cam);
+
+                // --- ОТРИСОВКА МУЛЬТИПЛЕЕРА ---
+                SDL_SetRenderDrawColor(ren, 20, 20, 30, 255);
+                SDL_RenderClear(ren);
+                clearZBuffer();
+                drawFloor(ren, cam);
+                
+                // <<< ВОТ ОН, ФИКС №2: Правильная отрисовка игроков >>>
+                SDL_Color playerColors[] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}, {255,255,0,255}};
+
+                // Определяем, кто мы, один раз
+                int my_id = g_isServer ? 0 : g_myPlayerID;
+
+                for (int i = 0; i < MAX_PLAYERS; i++) {
+                    if (g_players[i].active && i != my_id) { // Рисуем всех, кроме себя
+                        drawWorldCube(ren, g_players[i].pos, 1.0f, cam, playerColors[i]);
+                    }
+                }
+            }
+            break;
     }
-        if (g_isExiting) {
-    g_exitFadeAlpha = lerp(g_exitFadeAlpha, 255.0f, deltaTime * 4.0f);
-    if (g_exitFadeAlpha > 254.0f) {
-        running = 0; // Когда экран полностью черный, выходим по-настоящему
+    
+    // Плавный выход с затуханием
+    if (g_isExiting) {
+        g_exitFadeAlpha = lerp(g_exitFadeAlpha, 255.0f, deltaTime * 4.0f);
+        if (g_exitFadeAlpha > 254.0f) {
+            running = 0; // Когда экран полностью черный, выходим по-настоящему
+        }
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, (Uint8)g_exitFadeAlpha);
+        SDL_Rect fadeRect = {0, 0, WIDTH, HEIGHT};
+        SDL_RenderFillRect(ren, &fadeRect);
     }
-    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(ren, 0, 0, 0, (Uint8)g_exitFadeAlpha);
-    SDL_Rect fadeRect = {0, 0, WIDTH, HEIGHT};
-    SDL_RenderFillRect(ren, &fadeRect);
-}
-
-        SDL_RenderPresent(ren);
+    SDL_RenderPresent(ren);
     }
     AssetManager_Destroy(&assetManager);
     TTF_Quit();

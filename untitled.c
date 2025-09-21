@@ -5,6 +5,7 @@
 #include <string.h>
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <SDL_net.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -13,6 +14,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 }
 #endif
 
+#define MAX_PLAYERS 4
 // === ИСПРАВЛЕНИЕ 2: Убираем магические числа ===
 #define MAX_INPUT_LENGTH 100
 #define CONFIG_LINE_SIZE 256
@@ -211,6 +213,12 @@ typedef struct {
     AABB bounds;
     SDL_Color color;
 } CollisionBox;
+
+typedef struct {
+    int active;
+    Vec3 pos;
+    TCPsocket socket; // У каждого игрока свой "канал связи"
+} Player;
 
 typedef enum {
     PICKUP_TYPE_BOTTLE,
@@ -576,6 +584,14 @@ HandsSystem g_hands;
 
 AirstrikeEvent g_airstrike;
 CinematicState g_cinematic;
+
+int g_isMultiplayer = 0;
+int g_isServer = 0;
+Player g_players[MAX_PLAYERS];
+IPaddress g_server_ip;
+TCPsocket g_server_socket;
+// === ДОБАВЬ ЭТУ ГЛОБАЛЬНУЮ ПЕРЕМЕННУЮ ===
+int g_myPlayerID = -1;
 
 int g_isExiting = 0;       // Флаг, что мы в процессе выхода
 float g_exitFadeAlpha = 0.0f;
@@ -3885,11 +3901,127 @@ void loadConfig(const char* filename, GameConfig* config) {
     printf("Настройки загружены из %s\n", filename);
 }
 
+void init_multiplayer() {
+    SDLNet_Init();
+    g_isMultiplayer = 0;
+    g_isServer = 0;
+    for (int i = 0; i < MAX_PLAYERS; i++) {
+        g_players[i].active = 0;
+    }
+}
+
+void start_server() {
+    printf("Starting server on port 1234...\n");
+    if (SDLNet_ResolveHost(&g_server_ip, NULL, 1234) == -1) {
+        printf("SDLNet_ResolveHost: %s\n", SDLNet_GetError());
+        return;
+    }
+    g_server_socket = SDLNet_TCP_Open(&g_server_ip);
+    if (!g_server_socket) {
+        printf("SDLNet_TCP_Open: %s\n", SDLNet_GetError());
+        return;
+    }
+    g_isServer = 1;
+    g_isMultiplayer = 1;
+    g_players[0].active = 1; // Мы, как сервер, всегда игрок #0
+    printf("Server started successfully!\n");
+}
+
+void connect_to_server(const char* ip_address) {
+    printf("Connecting to %s:1234...\n", ip_address);
+    if (SDLNet_ResolveHost(&g_server_ip, ip_address, 1234) == -1) {
+        printf("SDLNet_ResolveHost: %s\n", SDLNet_GetError());
+        return;
+    }
+    g_server_socket = SDLNet_TCP_Open(&g_server_ip);
+    if (!g_server_socket) {
+        printf("SDLNet_TCP_Open: %s\n", SDLNet_GetError());
+        return;
+    }
+
+    // <<< ГЛАВНЫЙ ФИКС: Получаем свой ID от сервера >>>
+    SDLNet_TCP_Recv(g_server_socket, &g_myPlayerID, sizeof(int));
+    if (g_myPlayerID != -1) {
+        g_isMultiplayer = 1;
+        printf("Connected to server! I am Player %d\n", g_myPlayerID);
+    } else {
+         printf("Server is full or sent invalid data.\n");
+         SDLNet_TCP_Close(g_server_socket);
+    }
+
+}
+
+// === ЗАМЕНИ СТАРУЮ update_multiplayer НА ЭТУ ===
+void update_multiplayer(Camera* cam) {
+    if (!g_isMultiplayer) return;
+
+    if (g_isServer) {
+        // --- ЛОГИКА СЕРВЕРА ---
+        TCPsocket new_client = SDLNet_TCP_Accept(g_server_socket);
+        if (new_client) {
+            for (int i = 1; i < MAX_PLAYERS; i++) {
+                if (!g_players[i].active) {
+                    g_players[i].active = 1;
+                    g_players[i].socket = new_client;
+                    // <<< ГЛАВНЫЙ ФИКС: Говорим клиенту, кто он такой >>>
+                    SDLNet_TCP_Send(new_client, &i, sizeof(int)); 
+                    printf("Player %d connected!\n", i);
+                    break;
+                }
+            }
+        }
+        
+        g_players[0].pos.x = cam->x; g_players[0].pos.y = cam->y; g_players[0].pos.z = cam->z;
+
+        for (int i = 1; i < MAX_PLAYERS; i++) {
+            if (g_players[i].active) {
+                // Пытаемся получить их позицию. Если ошибка - дисконнект
+                if (SDLNet_TCP_Recv(g_players[i].socket, &g_players[i].pos, sizeof(Vec3)) <= 0) {
+                    printf("Player %d disconnected.\n", i);
+                    g_players[i].active = 0;
+                    SDLNet_TCP_Close(g_players[i].socket);
+                    g_players[i].socket = NULL;
+                }
+            }
+        }
+        // Рассылаем всем обновленное состояние
+        for (int i = 1; i < MAX_PLAYERS; i++) {
+            if (g_players[i].active) {
+                SDLNet_TCP_Send(g_players[i].socket, g_players, sizeof(Player) * MAX_PLAYERS);
+            }
+        }
+    } else {
+        // --- ЛОГИКА КЛИЕНТА ---
+        Vec3 mypos = {cam->x, cam->y, cam->z};
+        SDLNet_TCP_Send(g_server_socket, &mypos, sizeof(Vec3));
+        SDLNet_TCP_Recv(g_server_socket, g_players, sizeof(Player) * MAX_PLAYERS);
+    }
+}
+
+void shutdown_multiplayer() {
+    if (g_isMultiplayer) {
+        printf("Shutting down multiplayer...\n");
+        if (g_server_socket) {
+            SDLNet_TCP_Close(g_server_socket);
+            g_server_socket = NULL;
+        }
+        for (int i = 0; i < MAX_PLAYERS; i++) {
+            if (g_players[i].socket) {
+                SDLNet_TCP_Close(g_players[i].socket);
+                g_players[i].socket = NULL;
+            }
+        }
+        g_isMultiplayer = 0;
+        g_isServer = 0;
+    }
+}
+
 int main(int argc, char* argv[]) {
     // --- ЭТАП 1: МИНИМАЛЬНЫЙ ЗАПУСК ДЛЯ ОКНА ---
     if (SDL_Init(SDL_INIT_VIDEO) < 0) return 1;
     TTF_Init();
     init_fast_math(); // Математику считаем до окна, это быстро
+    init_multiplayer();
 
     SDL_Window* win = SDL_CreateWindow("GEOMETRICA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
     if (!win) return 1;
@@ -3993,7 +4125,6 @@ spawnBottle((Vec3){-2, 0, -6});
 
     // --- PROFILER: Начинаем замер "прочего" времени ---
     Profiler_Start(PROF_OTHER);
-
     // --- ОБРАБОТКА ВВОДА ---
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) g_isExiting = 1;
@@ -4018,10 +4149,17 @@ spawnBottle((Vec3){-2, 0, -6});
                     break;
                     
                 case STATE_MULTIPLAYER_MENU:
-                    if (e.key.keysym.sym == SDLK_ESCAPE) {
-                        g_currentState = STATE_MAIN_MENU;
+                if (e.key.keysym.sym == SDLK_h) { // 'H' for Host
+                        start_server();
+                        g_currentState = STATE_IN_GAME_MP;
+                        SDL_SetRelativeMouseMode(SDL_TRUE);
                     }
-                    // Здесь будет логика выбора Host/Join когда добавим
+                    if (e.key.keysym.sym == SDLK_j) { // 'J' for Join
+                        connect_to_server("127.0.0.1"); // Пока подключаемся к себе
+                        g_currentState = STATE_IN_GAME_MP;
+                        SDL_SetRelativeMouseMode(SDL_TRUE);
+                    }
+                    if (e.key.keysym.sym == SDLK_ESCAPE) g_currentState = STATE_MAIN_MENU;
                     break;
                     
                 case STATE_SETTINGS:
@@ -4069,6 +4207,7 @@ spawnBottle((Vec3){-2, 0, -6});
                     
                 case STATE_IN_GAME_MP:
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        shutdown_multiplayer();
                         g_currentState = STATE_MULTIPLAYER_MENU;
                         SDL_SetRelativeMouseMode(SDL_FALSE);
                     }
@@ -4078,7 +4217,7 @@ spawnBottle((Vec3){-2, 0, -6});
         }
         
         // Обработка движения мыши только в синглплеере
-        if (g_currentState == STATE_IN_GAME_SP && e.type == SDL_MOUSEMOTION) {
+        if ((g_currentState == STATE_IN_GAME_SP || g_currentState == STATE_IN_GAME_MP) && e.type == SDL_MOUSEMOTION) {
             cam.rotY += e.motion.xrel * config.mouseSensitivity;
             cam.rotX -= e.motion.yrel * config.mouseSensitivity;
             if (cam.rotX > 1.5f) cam.rotX = 1.5f;
@@ -4105,8 +4244,14 @@ spawnBottle((Vec3){-2, 0, -6});
             break;
             
         case STATE_MULTIPLAYER_MENU:
-            drawMultiplayerMenu(ren, large_font);
-            break;
+                // Вместо старой функции, новая
+                SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
+                SDL_RenderClear(ren);
+                drawText(ren, large_font, "MULTIPLAYER", WIDTH/2 - 100, HEIGHT/2 - 100, (SDL_Color){0, 255, 100, 255});
+                drawText(ren, font, "Press [H] to Host Game", WIDTH/2 - 100, HEIGHT/2 - 20, (SDL_Color){255, 255, 255, 255});
+                drawText(ren, font, "Press [J] to Join Game (localhost)", WIDTH/2 - 100, HEIGHT/2 + 20, (SDL_Color){255, 255, 255, 255});
+                drawText(ren, font, "Press [Escape] to go back", WIDTH/2 - 150, HEIGHT - 100, (SDL_Color){200, 200, 200, 255});
+                break;
             
         case STATE_SETTINGS:
             drawSettingsMenu(ren, font, editorVars, numEditorVars);
@@ -4524,12 +4669,57 @@ spawnBottle((Vec3){-2, 0, -6});
             break;
             
         case STATE_IN_GAME_MP:
-            // Заглушка для мультиплеера
-            SDL_SetRenderDrawColor(ren, 30, 10, 10, 255);
-            SDL_RenderClear(ren);
-            SDL_Color mpColor = {255, 100, 100, 255};
-            drawText(ren, font, "Connecting to the Grid...", WIDTH/2 - 150, HEIGHT/2, mpColor);
-            drawText(ren, font, "Press [Escape] to go back", WIDTH/2 - 150, HEIGHT - 100, mpColor);
+            {
+                    // --- ДВИГАЕМ СВОЮ КАМЕРУ ---
+                // <<< ВОТ ОН, ФИКС №1: Мы считываем нажатия клавиш ПЕРЕД тем, как их использовать >>>
+                const Uint8* keyState_mp = SDL_GetKeyboardState(NULL);
+                
+                g_fov = config.fov;
+                cam.isCrouching = keyState_mp[SDL_SCANCODE_LCTRL];
+                cam.targetHeight = cam.isCrouching ? CROUCHING_HEIGHT : STANDING_HEIGHT;
+                cam.height = lerp(cam.height, cam.targetHeight, deltaTime * CROUCH_LERP_SPEED);
+                cam.isRunning = (keyState_mp[SDL_SCANCODE_LSHIFT] || keyState_mp[SDL_SCANCODE_RSHIFT]) && !cam.isCrouching;
+                float moveSpeed = cam.isRunning ? config.runSpeed : config.walkSpeed;
+                if (cam.isCrouching) moveSpeed *= config.crouchSpeedMultiplier;
+
+                cam.targetVx = 0;
+                cam.targetVz = 0;
+                float forwardX = fast_sin(cam.rotY), forwardZ = fast_cos(cam.rotY);
+                float rightX = fast_cos(cam.rotY), rightZ = -fast_sin(cam.rotY);
+                if (keyState_mp[SDL_SCANCODE_W]) { cam.targetVx += forwardX * moveSpeed; cam.targetVz += forwardZ * moveSpeed; }
+                if (keyState_mp[SDL_SCANCODE_S]) { cam.targetVx -= forwardX * moveSpeed; cam.targetVz -= forwardZ * moveSpeed; }
+                if (keyState_mp[SDL_SCANCODE_A]) { cam.targetVx -= rightX * moveSpeed; cam.targetVz -= rightZ * moveSpeed; }
+                if (keyState_mp[SDL_SCANCODE_D]) { cam.targetVx += rightX * moveSpeed; cam.targetVz += rightZ * moveSpeed; }
+                
+                cam.vx = lerp(cam.vx, cam.targetVx, deltaTime * config.acceleration);
+                cam.vz = lerp(cam.vz, cam.targetVz, deltaTime * config.deceleration);
+                float newX = cam.x + cam.vx * deltaTime * 60.0f;
+                float newZ = cam.z + cam.vz * deltaTime * 60.0f;
+                cam.x = newX; // В мультиплеере пока нет коллизий
+                cam.z = newZ;
+                // <<< КОНЕЦ БЛОКА ДВИЖЕНИЯ >>>
+
+                // --- ЛОГИКА МУЛЬТИПЛЕЕРА ---
+                update_multiplayer(&cam);
+
+                // --- ОТРИСОВКА МУЛЬТИПЛЕЕРА ---
+                SDL_SetRenderDrawColor(ren, 20, 20, 30, 255);
+                SDL_RenderClear(ren);
+                clearZBuffer();
+                drawFloor(ren, cam);
+                
+                // <<< ВОТ ОН, ФИКС №2: Правильная отрисовка игроков >>>
+                SDL_Color playerColors[] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}, {255,255,0,255}};
+
+                // Определяем, кто мы, один раз
+                int my_id = g_isServer ? 0 : g_myPlayerID;
+
+                for (int i = 0; i < MAX_PLAYERS; i++) {
+                    if (g_players[i].active && i != my_id) { // Рисуем всех, кроме себя
+                        drawWorldCube(ren, g_players[i].pos, 1.0f, cam, playerColors[i]);
+                    }
+                }
+            }
             break;
     }
     

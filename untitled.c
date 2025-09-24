@@ -3846,6 +3846,25 @@ void updateAirstrike(float deltaTime, Camera* playerCam) {
     }
 }
 
+// === ВСТАВЬ ЭТОТ ЧЕРТЁЖ ПЕРЕД drawMainMenu ===
+
+// 6 вершин нашего охуенного октаэдра
+Vec3 octahedron_verts[6] = {
+    { 0,  1,  0}, // 0: Верхняя точка
+    { 0, -1,  0}, // 1: Нижняя точка
+    { 1,  0,  0}, // 2: Правая
+    {-1,  0,  0}, // 3: Левая
+    { 0,  0,  1}, // 4: Передняя
+    { 0,  0, -1}  // 5: Задняя
+};
+
+// 12 рёбер, которые соединяют эти вершины
+int octahedron_edges[12][2] = {
+    {0, 2}, {0, 3}, {0, 4}, {0, 5}, // Рёбра от верхушки
+    {1, 2}, {1, 3}, {1, 4}, {1, 5}, // Рёбра от низа
+    {2, 4}, {4, 3}, {3, 5}, {5, 2}  // Рёбра по экватору
+};
+
 void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
     SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
     SDL_RenderClear(ren);
@@ -3854,36 +3873,43 @@ void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
     SDL_Color optionColor = {200, 200, 200, 255};
     SDL_Color selectedColor = {255, 255, 0, 255};
 
-    // --- Рисуем название "G OMETRICA" ---
+    // --- Рисуем название "G OMETRICA" (как и раньше) ---
     drawText(ren, font, "G", WIDTH/2 - 150, HEIGHT/2 - 100, titleColor);
-    // Пропускаем место для 'E'
     drawText(ren, font, "OMETRICA", WIDTH/2 - 80, HEIGHT/2 - 100, titleColor);
 
-    // --- Рисуем вращающийся ромб вместо 'E' ---
-    int rhombus_cx = WIDTH/2 - 115;
-    int rhombus_cy = HEIGHT/2 - 90;
+    // --- А ВОТ ТУТ, БЛЯДЬ, НАЧИНАЕТСЯ МАГИЯ ---
+    int center_x = WIDTH/2 - 106.5;
+    int center_y = HEIGHT/2 - 90;
     int size = 20;
     
-    Vec3 points[4] = {
-        {rhombus_cx, rhombus_cy - size, 0}, // top
-        {rhombus_cx + size, rhombus_cy, 0}, // right
-        {rhombus_cx, rhombus_cy + size, 0}, // bottom
-        {rhombus_cx - size, rhombus_cy, 0}  // left
-    };
-    
-    // Вращаем точки
-    for(int i=0; i<4; i++){
-        float x = points[i].x - rhombus_cx;
-        float y = points[i].y - rhombus_cy;
-        points[i].x = x * fast_cos(g_menuRhombusAngle) - y * fast_sin(g_menuRhombusAngle) + rhombus_cx;
-        points[i].y = x * fast_sin(g_menuRhombusAngle) + y * fast_cos(g_menuRhombusAngle) + rhombus_cy;
+    // Создаем массив для 2D-точек на экране
+    SDL_Point screen_points[6];
+
+    // 1. ВРАЩАЕМ, БЛЯДЬ, ВЕРШИНЫ В 3D
+    for(int i = 0; i < 6; i++) {
+        Vec3 v = octahedron_verts[i];
+
+        // Вращаем по Y (вокруг вертикальной оси)
+        float newX = v.x * fast_cos(g_menuRhombusAngle) - v.z * fast_sin(g_menuRhombusAngle);
+        float newZ = v.x * fast_sin(g_menuRhombusAngle) + v.z * fast_cos(g_menuRhombusAngle);
+        
+        // 2. ПРОЕЦИРУЕМ, НАХУЙ, НА 2D-ЭКРАН
+        // Мы просто, блядь, берем X и Y. А Z используем для перспективы.
+        screen_points[i].x = center_x + (int)(newX * size);
+        screen_points[i].y = center_y - (int)(v.y * size); // Y в SDL инвертирован
     }
 
+    // 3. РИСУЕМ, СУКА, РЁБРА
     SDL_SetRenderDrawColor(ren, titleColor.r, titleColor.g, titleColor.b, 255);
-    for(int i=0; i<4; i++){
-        SDL_RenderDrawLine(ren, (int)points[i].x, (int)points[i].y, (int)points[(i+1)%4].x, (int)points[(i+1)%4].y);
+    for(int i = 0; i < 12; i++) {
+        int start_index = octahedron_edges[i][0];
+        int end_index = octahedron_edges[i][1];
+        
+        SDL_RenderDrawLine(ren, 
+            screen_points[start_index].x, screen_points[start_index].y,
+            screen_points[end_index].x, screen_points[end_index].y
+        );
     }
-    
     // --- Рисуем пункты меню (ТЕПЕРЬ 4 ШТУКИ!) ---
     const char* menuItems[] = { "Single Player", "Multiplayer", "Settings", "Exit" };
     for (int i = 0; i < 4; i++) {  // ← Изменено с 3 на 4
@@ -4870,7 +4896,7 @@ spawnBottle((Vec3){-2, 0, -6});
                 SDL_RenderClear(ren);
                 clearZBuffer();
                 drawMultiplayerFloor(ren, cam);
-                
+
                 // <<< ВОТ ОН, ФИКС №2: Правильная отрисовка игроков >>>
                 SDL_Color playerColors[] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}, {255,255,0,255}};
 

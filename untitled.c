@@ -4296,6 +4296,11 @@ spawnBottle((Vec3){-2, 0, -6});
                         g_currentState = STATE_MULTIPLAYER_MENU;
                         SDL_SetRelativeMouseMode(SDL_FALSE);
                     }
+                    if (e.key.keysym.sym == SDLK_SPACE && !cam.isCrouching) {
+        if (isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
+            cam.vy = config.jumpForce;
+        }
+    }
                     // Здесь будет логика мультиплеера
                     break;
             }
@@ -4776,7 +4781,18 @@ spawnBottle((Vec3){-2, 0, -6});
                 float newZ = cam.z + cam.vz * deltaTime * 60.0f;
                 cam.x = newX; // В мультиплеере пока нет коллизий
                 cam.z = newZ;
-                // <<< КОНЕЦ БЛОКА ДВИЖЕНИЯ >>>
+
+                // После cam.z = newZ; добавь:
+                cam.vy -= config.gravity * deltaTime;
+                float newY = cam.y + cam.vy * deltaTime * 60.0f;
+
+                if (newY <= 0) {
+                    cam.y = 0;
+                    cam.vy = 0;
+                } else {
+                    cam.y = newY;
+                }
+                 // <<< КОНЕЦ БЛОКА ДВИЖЕНИЯ >>>
 
                 // --- ЛОГИКА МУЛЬТИПЛЕЕРА ---
                 update_multiplayer(&cam);

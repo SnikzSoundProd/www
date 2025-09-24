@@ -6,6 +6,7 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <SDL_net.h>
+#include <time.h> // <<< ВОТ ОНА, БЛЯДЬ! ИСКРА!
 
 #ifdef _WIN32
 #include <windows.h>
@@ -562,6 +563,49 @@ MultiplayerMenuState g_mp_menu_state = MP_MENU_SELECT;
 char g_ip_input_buffer[100] = "127.0.0.1";
 int g_ip_input_length = 9;
 
+int g_showCrosshair = 0;
+
+// === ДОБАВЬ ЭТУ ГЛОБАЛЬНУЮ ПЕРЕМЕННУЮ ===
+Vec3 g_debug_ray_end;
+
+// === ВСТАВЬ ЭТОТ АРСЕНАЛ В ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
+
+const char* g_splashes[] = {
+    "В чем сила, брат?",
+    "Делай что хочешь.",
+    "Мы, нахуй, в гараже.",
+    "Это, блядь, Vibe-Driven Development.",
+    "База.",
+    "А мораль здесь такова...",
+    "Один файл. Одна душа.",
+    "Сделано на процессоре, потому что нам похуй.",
+    "Тут нет багов. Только незадокументированные фичи.",
+    "Иногда кокос - это просто кокос.",
+    "+0.01f к вере в себя!",
+    "Не падай на лису!",
+    "Альо, это Пакистан?",
+    "Протокол 'Анти-Пизда' активен.",
+    "Дискурс исчерпан.",
+    "Работайте, братья.",
+    "СВО (Специальная Визуальная Операция)",
+    "Проводились плановые технические работы...",
+    "Я, блядь, гений наоборот.",
+    "Connecting to 127.0.0.1...",
+    "Failed to receive player ID from server.",
+    "Вырубай, нахуй, VPN.",
+    "Это не ошибка. Это, блядь, обряд инициации.",
+    "Проблема в роутере.",
+    "Проблема в брандмауэре.",
+    "Проблема, блядь, в провайдере.",
+    "Готовь, блядь, скрепку.",
+    "Ты, нахуй, только что взломал Матрицу.",
+    "Мы не просто кодим. Мы, нахуй, творим.",
+    "Мне в кайф."
+};
+const int NUM_SPLASHES = sizeof(g_splashes) / sizeof(const char*);
+
+// Переменная для хранения текущего сплэша
+char g_current_splash[256];
 GameState g_currentState;
 int g_menuSelectedOption = 0;
 int g_settingsSelectedOption = 0;
@@ -1438,62 +1482,6 @@ int intersectRayAABB(Vec3 rayOrigin, Vec3 rayDir, Vec3 boxMin, Vec3 boxMax, floa
     *t = tmin;
     return tmax > 0;
 }
-
-// [НОВЫЙ КОД] Логика "гравитационных перчаток"
-void updateGravityGlove(Camera* cam, float deltaTime) {
-    // Сбрасываем подсветку с предыдущего объекта, если он больше не цель
-    if (g_hands.targetedObject && g_hands.targetedObject->state != PICKUP_STATE_PULLED) {
-        g_hands.targetedObject->color = g_hands.targetedObject->originalColor;
-        g_hands.targetedObject = NULL;
-    }
-
-    // Если мы уже что-то держим или притягиваем, выходим
-    if (g_hands.heldObject || g_hands.pulledObject) {
-        return;
-    }
-
-    // Только в состоянии прицеливания ищем цель
-    if (g_hands.currentState != HAND_STATE_AIMING) {
-        return;
-    }
-
-    // 1. Создаем луч из камеры
-    Vec3 rayOrigin = {cam->x, cam->y + cam->height, cam->z};
-    Vec3 rayDir = {
-        fast_sin(cam->rotY) * fast_cos(cam->rotX),
-        -fast_sin(cam->rotX), // Направление по вертикали
-        fast_cos(cam->rotY) * fast_cos(cam->rotX)
-    };
-    rayDir = normalize(rayDir);
-
-    // 2. Ищем пересечение с объектами
-    float closest_t = RAYCAST_MAX_DISTANCE;
-    PickupObject* potentialTarget = NULL;
-
-    for (int i = 0; i < g_numPickups; i++) {
-        PickupObject* obj = &g_pickups[i];
-        if (obj->state != PICKUP_STATE_IDLE) continue;
-
-        Vec3 boxMin = {obj->pos.x - obj->size.x/2, obj->pos.y - obj->size.y/2, obj->pos.z - obj->size.z/2};
-        Vec3 boxMax = {obj->pos.x + obj->size.x/2, obj->pos.y + obj->size.y/2, obj->pos.z + obj->size.z/2};
-        
-        float t;
-        if (intersectRayAABB(rayOrigin, rayDir, boxMin, boxMax, &t)) {
-            if (t < closest_t) {
-                closest_t = t;
-                potentialTarget = obj;
-            }
-        }
-    }
-    
-    g_hands.targetedObject = potentialTarget;
-
-    // 3. Если нашли цель, подсвечиваем ее
-    if (g_hands.targetedObject) {
-        g_hands.targetedObject->color = (SDL_Color){255, 165, 0, 255}; // Оранжевая подсветка
-    }
-}
-
 void updateShards(float deltaTime) {
     for (int i = 0; i < g_numShards; i++) {
         GlassShard* shard = &g_shards[i];
@@ -1538,216 +1526,6 @@ void updateShards(float deltaTime) {
         }
     }
     g_numShards = writeIdx;
-}
-
-// --- ОБНОВЛЕНИЕ РУК ---
-
-void updateHandsState(Camera* cam, float deltaTime) {
-    HandState newState = HAND_STATE_IDLE;
-
-    const Uint8* keyState = SDL_GetKeyboardState(NULL);
-
-    if (g_hands.heldObject) {
-        newState = HAND_STATE_HOLDING;
-    } else if (keyState[SDL_SCANCODE_E]) { // Прицеливание на E
-        newState = HAND_STATE_AIMING;
-    } else if (g_hands.flick.isActive) {
-        newState = HAND_STATE_PULLING;
-    } else if (cam->isMoving) {
-        newState = cam->isRunning ? HAND_STATE_RUNNING : HAND_STATE_WALKING;
-    } else if (cam->vy > 0.1f) {
-        newState = HAND_STATE_JUMPING;
-    }
-    
-    // Плавный переход между состояниями
-    if (newState != g_hands.targetState) {
-        g_hands.targetState = newState;
-        g_hands.stateTransition = 0.0f;
-    }
-    
-    g_hands.stateTransition = lerp(g_hands.stateTransition, 1.0f, deltaTime * 5.0f);
-    
-    if (g_hands.stateTransition > 0.95f) {
-        g_hands.currentState = g_hands.targetState;
-        g_hands.stateTransition = 1.0f;
-    }
-
-    // Обновление анимации флика
-    if (g_hands.flick.isActive) {
-        g_hands.flick.progress += deltaTime * 8.0f;
-        if (g_hands.flick.progress >= 2.0f) {
-            g_hands.flick.isActive = 0;
-            g_hands.flick.progress = 0.0f;
-        }
-    }
-}
-
-void updateHandsAnimation(Camera* cam, float deltaTime) {
-    // Базовые позиции рук
-    Vec3 idleLeft = {-0.3f, -0.3f, 0.4f};
-    Vec3 idleRight = {0.3f, -0.3f, 0.4f};
-    
-    Vec3 targetLeft = idleLeft;
-    Vec3 targetRight = idleRight;
-    
-    switch(g_hands.currentState) {
-        case HAND_STATE_IDLE:
-            // Лёгкое покачивание
-            g_hands.idlePhase += deltaTime * 2.0f;
-            targetLeft.y += fast_sin(g_hands.idlePhase) * 0.02f;
-            targetRight.y += fast_sin(g_hands.idlePhase + 0.5f) * 0.02f;
-            break;
-            
-        case HAND_STATE_WALKING:
-            // Маятниковое движение при ходьбе
-            g_hands.walkPhase += deltaTime * 6.0f;
-            targetLeft.z += fast_sin(g_hands.walkPhase) * 0.1f;
-            targetLeft.y += fabsf(fast_sin(g_hands.walkPhase * 2)) * 0.05f;
-            targetRight.z += fast_sin(g_hands.walkPhase + M_PI) * 0.1f;
-            targetRight.y += fabsf(fast_sin(g_hands.walkPhase * 2 + M_PI)) * 0.05f;
-            break;
-            
-        case HAND_STATE_RUNNING:
-            // Более активное движение при беге
-            g_hands.runPhase += deltaTime * 10.0f;
-            targetLeft.z += fast_sin(g_hands.runPhase) * 0.2f;
-            targetLeft.x -= fabsf(fast_sin(g_hands.runPhase)) * 0.1f;
-            targetLeft.y += fabsf(fast_sin(g_hands.runPhase * 2)) * 0.1f;
-            
-            targetRight.z += fast_sin(g_hands.runPhase + M_PI) * 0.2f;
-            targetRight.x += fabsf(fast_sin(g_hands.runPhase + M_PI)) * 0.1f;
-            targetRight.y += fabsf(fast_sin(g_hands.runPhase * 2 + M_PI)) * 0.1f;
-            break;
-            
-        case HAND_STATE_JUMPING:
-            // Руки поднимаются вверх
-            targetLeft.y += 0.3f;
-            targetLeft.x -= 0.1f;
-            targetRight.y += 0.3f;
-            targetRight.x += 0.1f;
-            break;
-            
-        case HAND_STATE_REACHING:
-            // Правая рука тянется вперёд
-            targetRight.z += 0.3f;
-            targetRight.y += 0.1f;
-            // Пальцы "хватают" (имитация через позицию)
-            targetRight.x += fast_sin(SDL_GetTicks() * 0.005f) * 0.02f;
-            break;
-            
-        case HAND_STATE_HOLDING:
-            // Держим объект
-            targetRight.z += 0.2f;
-            targetRight.y += 0.05f;
-            targetRight.x += 0.05f;
-            break;
-            
-        case HAND_STATE_THROWING:
-            // Замах и бросок
-            g_hands.throwPhase += deltaTime * 8.0f;
-            if (g_hands.throwPhase < M_PI) {
-                // Замах назад
-                targetRight.z -= 0.3f * fast_sin(g_hands.throwPhase);
-                targetRight.y += 0.2f * fast_sin(g_hands.throwPhase);
-            } else {
-                // Бросок вперёд
-                targetRight.z += 0.5f * fast_sin(g_hands.throwPhase - M_PI);
-                targetRight.y -= 0.1f * fast_sin(g_hands.throwPhase - M_PI);
-            }
-            
-            if (g_hands.throwPhase > 2 * M_PI) {
-                g_hands.throwPhase = 0;
-                g_hands.currentState = HAND_STATE_IDLE;
-            }
-            break;
-            
-        case HAND_STATE_INSPECTING:
-            // Осмотр рук
-            g_hands.inspectPhase += deltaTime * 3.0f;
-            
-            float inspectProgress = g_hands.inspectPhase;
-            
-            if (inspectProgress < 1.0f) {
-                // Поднимаем руки
-                targetLeft.y += inspectProgress * 0.3f;
-                targetLeft.z += inspectProgress * 0.2f;
-                targetRight.y += inspectProgress * 0.3f;
-                targetRight.z += inspectProgress * 0.2f;
-            } else if (inspectProgress < 3.0f) {
-                // Шевелим пальцами (имитация)
-                targetLeft.y += 0.3f;
-                targetLeft.z += 0.2f;
-                targetLeft.x += fast_sin((inspectProgress - 1.0f) * 4.0f) * 0.05f;
-                
-                targetRight.y += 0.3f;
-                targetRight.z += 0.2f;
-                targetRight.x -= fast_sin((inspectProgress - 1.0f) * 4.0f) * 0.05f;
-            } else if (inspectProgress < 4.0f) {
-                // Поворот тыльной стороной
-                float turnProgress = inspectProgress - 3.0f;
-                targetLeft.y += 0.3f;
-                targetLeft.z += 0.2f - turnProgress * 0.1f;
-                g_hands.leftRot.y = turnProgress * M_PI;
-                
-                targetRight.y += 0.3f;
-                targetRight.z += 0.2f - turnProgress * 0.1f;
-                g_hands.rightRot.y = -turnProgress * M_PI;
-            } else if (inspectProgress < 5.0f) {
-                // Обратный поворот
-                float turnProgress = 1.0f - (inspectProgress - 4.0f);
-                targetLeft.y += 0.3f;
-                targetLeft.z += 0.1f + turnProgress * 0.1f;
-                g_hands.leftRot.y = turnProgress * M_PI;
-                
-                targetRight.y += 0.3f;
-                targetRight.z += 0.1f + turnProgress * 0.1f;
-                g_hands.rightRot.y = -turnProgress * M_PI;
-            } else {
-                // Опускаем руки обратно
-                g_hands.inspectPhase = 0;
-                g_hands.currentState = HAND_STATE_IDLE;
-                g_hands.leftRot.y = 0;
-                g_hands.rightRot.y = 0;
-            }
-            break;
-
-            case HAND_STATE_AIMING:
-            // Правая рука вытягивается вперед для прицеливания
-            targetRight.z -= 0.2f;
-            targetRight.y += 0.1f;
-            targetRight.x -= 0.1f;
-            // Левая рука чуть приподнимается
-            targetLeft.y += 0.05f;
-            targetLeft.x += 0.05f;
-            break;
-
-        case HAND_STATE_PULLING: {
-            // Анимация "флика"
-            float flickAmount = 0.0f;
-            if (g_hands.flick.progress < 1.0f) {
-                flickAmount = g_hands.flick.progress; // Движение назад
-            } else {
-                flickAmount = 1.0f - (g_hands.flick.progress - 1.0f); // Движение вперед
-            }
-            targetRight.z += flickAmount * 0.3f; // Рука дергается назад-вперед
-            targetRight.y -= flickAmount * 0.1f;
-            break;
-        }
-    }
-    
-    // Применяем плавную интерполяцию
-    float lerpSpeed = 8.0f;
-    if (g_hands.currentState == HAND_STATE_THROWING) {
-        lerpSpeed = 15.0f; // Быстрее для броска
-    }
-    
-    g_hands.leftPos.x = lerp(g_hands.leftPos.x, targetLeft.x, deltaTime * lerpSpeed);
-    g_hands.leftPos.y = lerp(g_hands.leftPos.y, targetLeft.y, deltaTime * lerpSpeed);
-    g_hands.leftPos.z = lerp(g_hands.leftPos.z, targetLeft.z, deltaTime * lerpSpeed);
-    
-    g_hands.rightPos.x = lerp(g_hands.rightPos.x, targetRight.x, deltaTime * lerpSpeed);
-    g_hands.rightPos.y = lerp(g_hands.rightPos.y, targetRight.y, deltaTime * lerpSpeed);
-    g_hands.rightPos.z = lerp(g_hands.rightPos.z, targetRight.z, deltaTime * lerpSpeed);
 }
 
 // [ИЗМЕНЕНО] Бросок объекта, теперь с набором силы
@@ -3400,6 +3178,76 @@ int isBoxInFrustum_Improved(CollisionBox* box, Camera cam) {
     
     return 0; // Объект за пределами поля зрения
 }
+// Наша новая глобальная переменная. Будет хранить то, на что мы смотрим.
+PickupObject* g_targetedObject = NULL;
+
+void drawCrosshair(SDL_Renderer* ren) {
+
+    if (!g_showCrosshair) {
+        return; // Если кнопка выключена - ПОШЁЛ НАХУЙ ОТСЮДА
+    }
+
+    int cx = WIDTH / 2;
+    int cy = HEIGHT / 2;
+    
+    // Если мы на что-то навелись - прицел становится жёлтым и большим
+    if (g_targetedObject) {
+        SDL_SetRenderDrawColor(ren, 255, 255, 0, 255);
+        SDL_RenderDrawLine(ren, cx - 10, cy, cx + 10, cy);
+        SDL_RenderDrawLine(ren, cx, cy - 10, cx, cy + 10);
+    } else {
+        // Обычный, маленький, белый прицел
+        SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+        SDL_RenderDrawLine(ren, cx - 5, cy, cx + 5, cy);
+        SDL_RenderDrawLine(ren, cx, cy - 5, cx, cy + 5);
+    }
+}
+
+// === ЗАМЕНИ СТАРУЮ updateTractorBeam НА ЭТУ ===
+void updateTractorBeam(Camera* cam) {
+    if (g_targetedObject) {
+        g_targetedObject->color = g_targetedObject->originalColor;
+        g_targetedObject = NULL;
+    }
+    if (g_hands.heldObject) return;
+
+    Vec3 rayOrigin = {cam->x, cam->y + cam->height, cam->z};
+    Vec3 rayDir = { fast_sin(cam->rotY) * fast_cos(cam->rotX), fast_sin(cam->rotX), fast_cos(cam->rotY) * fast_cos(cam->rotX) };
+    rayDir = normalize(rayDir);
+
+    // <<< НАЧИНАЕМ, БЛЯДЬ, ВСКРЫТИЕ >>>
+    static Uint32 last_debug_print = 0;
+    if (SDL_GetTicks() - last_debug_print > 500) { // Печатаем дебаг 2 раза в секунду
+        printf("--- DEBUG TICK ---\n");
+        printf("[CAM POS]: x=%.2f, y=%.2f, z=%.2f\n", cam->x, cam->y, cam->z);
+        printf("[CAM ROT]: y=%.2f, x=%.2f\n", cam->rotY, cam->rotX);
+        printf("[RAY DIR]: x=%.2f, y=%.2f, z=%.2f\n", rayDir.x, rayDir.y, rayDir.z);
+        last_debug_print = SDL_GetTicks();
+    }
+
+    float closest_t = 3.0f; // Максимальная дистанция
+    PickupObject* potentialTarget = NULL;
+
+    for (int i = 0; i < g_numPickups; i++) {
+        PickupObject* obj = &g_pickups[i];
+        if (obj->state != PICKUP_STATE_IDLE) continue;
+        Vec3 boxMin = {obj->pos.x - obj->size.x/2, obj->pos.y - obj->size.y/2, obj->pos.z - obj->size.z/2};
+        Vec3 boxMax = {obj->pos.x + obj->size.x/2, obj->pos.y + obj->size.y/2, obj->pos.z + obj->size.z/2};
+        float t;
+        if (intersectRayAABB(rayOrigin, rayDir, boxMin, boxMax, &t)) {
+            if (t < closest_t) {
+                closest_t = t;
+                potentialTarget = obj;
+            }
+        }
+    }
+    
+    g_targetedObject = potentialTarget;
+
+    if (g_targetedObject) {
+        g_targetedObject->color = (SDL_Color){255, 255, 0, 255};
+    }
+}
 
 // --- DAY/NIGHT CYCLE FUNCTIONS ---
 
@@ -3873,6 +3721,8 @@ void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
     SDL_Color optionColor = {200, 200, 200, 255};
     SDL_Color selectedColor = {255, 255, 0, 255};
 
+    SDL_Color splashColor = {255, 255, 0, 255};
+
     // --- Рисуем название "G OMETRICA" (как и раньше) ---
     drawText(ren, font, "G", WIDTH/2 - 150, HEIGHT/2 - 100, titleColor);
     drawText(ren, font, "OMETRICA", WIDTH/2 - 80, HEIGHT/2 - 100, titleColor);
@@ -3910,12 +3760,25 @@ void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
             screen_points[end_index].x, screen_points[end_index].y
         );
     }
-    // --- Рисуем пункты меню (ТЕПЕРЬ 4 ШТУКИ!) ---
+
+    // --- А ВОТ, БЛЯДЬ, И ГОЛОС ИЗ НООСФЕРЫ ---
+    // Слегка пульсирующая прозрачность
+    splashColor.a = 155 + (Uint8)(fast_sin(SDL_GetTicks() * 0.002f) * 100.0f);
+    int text_w, text_h;
+    TTF_SizeUTF8(font, g_current_splash, &text_w, &text_h);
+    // Рисуем чуть выше и правее заголовка
+    drawText(ren, font, g_current_splash, WIDTH/2 - 100 + text_w / 2, HEIGHT/2 - 120, splashColor);
+    
+    // --- Рисуем пункты меню ---
     const char* menuItems[] = { "Single Player", "Multiplayer", "Settings", "Exit" };
-    for (int i = 0; i < 4; i++) {  // ← Изменено с 3 на 4
-        drawText(ren, font, menuItems[i], WIDTH/2 - 80, HEIGHT/2 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
+    for (int i = 0; i < 4; i++) {
+        char itemText[128];
+        snprintf(itemText, sizeof(itemText), "%s %s", (i == g_menuSelectedOption) ? ">" : " ", menuItems[i]);
+        drawText(ren, font, itemText, WIDTH/2 - 100, HEIGHT/2 + 20 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
     }
+
 }
+
 // === ДОБАВЬ ЭТУ НОВУЮ ФУНКЦИЮ ===
 // === ЗАМЕНИ drawMultiplayerMenu ===
 void drawMultiplayerMenu(SDL_Renderer* ren, TTF_Font* font) {
@@ -3959,7 +3822,42 @@ void drawMultiplayerMenu(SDL_Renderer* ren, TTF_Font* font) {
     }
 }
 
-void drawSettingsMenu(SDL_Renderer* ren, TTF_Font* font, EditableVariable* vars, int numVars) {
+// === ВСТАВЬ ЭТОТ БЛОК ПЕРЕД drawSettingsMenu ===
+
+// Наши, блядь, ASCII-лица. По одному на каждую настройку + "Назад".
+const char* SETTINGS_FACES[] = {
+    "(⌐■_■)", // Mouse Sensitivity
+    "(•_•)",   // Walk Speed
+    "\\(>o<)/", // Run Speed
+    "(^.^)",   // Jump Force
+    "(v_v)",   // Gravity
+    "(O_O)",   // Field of View
+    "(._.) /"  // Back
+};
+
+// Наши, блядь, объяснения.
+const char* SETTINGS_DESCRIPTIONS[] = {
+    "Как быстро, нахуй, башка вертится.",
+    "Скорость для чилла и прогулок.",
+    "Когда надо съебаться. Быстро.",
+    "Как высоко, блядь, подлетаешь.",
+    "Как сильно тебя к земле тянет.",
+    "Насколько у тебя, нахуй, широкие глаза.",
+    "Вернуться и сохранить эту дичь."
+};
+
+// Наши, блядь, финальные реплики.
+const char* SETTINGS_REMARKS[] = {
+    "Резкость — это вежливость.",
+    "Тише едешь - дальше будешь.",
+    "Беги, Форрест, беги!",
+    "В небо, нахуй!",
+    "Помни о своих корнях, брат.",
+    "Видишь всё. Вообще всё.",
+    "Был рад попиздеть."
+};
+
+void drawSettingsMenu(SDL_Renderer* ren, TTF_Font* font, TTF_Font* large_font, EditableVariable* vars, int numVars) {
     SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
     SDL_RenderClear(ren);
     
@@ -3976,6 +3874,29 @@ void drawSettingsMenu(SDL_Renderer* ren, TTF_Font* font, EditableVariable* vars,
     }
     
     drawText(ren, font, "Back", 50, 80 + numVars * 30, (numVars == g_settingsSelectedOption) ? selectedColor : optionColor);
+
+    if (g_settingsSelectedOption >= 0 && g_settingsSelectedOption <= numVars) {
+        
+        // 1. Рисуем ASCII-морду в центре
+        const char* face = SETTINGS_FACES[g_settingsSelectedOption];
+        int face_w, face_h;
+        TTF_SizeUTF8(large_font, face, &face_w, &face_h);
+        drawText(ren, large_font, face, WIDTH / 2 - face_w / 2, HEIGHT / 2 - 100, selectedColor);
+
+        // 2. Рисуем фон для описания внизу
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 180);
+        SDL_Rect bgRect = { 0, HEIGHT - 100, WIDTH, 100 };
+        SDL_RenderFillRect(ren, &bgRect);
+
+        // 3. Собираем и рисуем текст
+        char full_text[512];
+        snprintf(full_text, sizeof(full_text), "Хммм... %s %s", 
+                 SETTINGS_DESCRIPTIONS[g_settingsSelectedOption], 
+                 SETTINGS_REMARKS[g_settingsSelectedOption]);
+        
+        drawText(ren, font, full_text, 50, HEIGHT - 70, optionColor);
+    }
 }
 
 void clearZBuffer() {
@@ -3988,6 +3909,12 @@ void clearZBuffer() {
     }
 }
 
+// === ВСТАВЬ ЭТУ ФУНКЦИЮ ПЕРЕД main ===
+void selectNewSplash() {
+    int index = rand() % NUM_SPLASHES;
+    strncpy(g_current_splash, g_splashes[index], 255);
+    g_current_splash[255] = '\0';
+}
 
 void saveConfig(const char* filename, GameConfig* config) {
     FILE* file = fopen(filename, "w");
@@ -4171,6 +4098,7 @@ int main(int argc, char* argv[]) {
     // --- ЭТАП 1: МИНИМАЛЬНЫЙ ЗАПУСК ДЛЯ ОКНА ---
     if (SDL_Init(SDL_INIT_VIDEO) < 0) return 1;
     TTF_Init();
+    srand(time(NULL));
     init_fast_math(); // Математику считаем до окна, это быстро
     init_multiplayer();
 
@@ -4251,6 +4179,7 @@ spawnBottle((Vec3){-2, 0, -6});
     float playerRadius = 0.3f;
 
     g_currentState = STATE_MAIN_MENU;
+    selectNewSplash();
     
     SDL_SetRelativeMouseMode(SDL_TRUE);
 
@@ -4346,6 +4275,7 @@ spawnBottle((Vec3){-2, 0, -6});
                     if (e.key.keysym.sym == SDLK_DOWN) g_settingsSelectedOption = (g_settingsSelectedOption + 1) % (numEditorVars + 1);
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
                         g_currentState = STATE_MAIN_MENU;
+                        selectNewSplash();
                         saveConfig("settings.cfg", &config); // Сохраняем при выходе
                     }
                     if (g_settingsSelectedOption < numEditorVars) { // Если выбрана настройка
@@ -4360,8 +4290,23 @@ spawnBottle((Vec3){-2, 0, -6});
                 case STATE_IN_GAME_SP:
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
                         g_currentState = STATE_MAIN_MENU;
+                        selectNewSplash();
                         SDL_SetRelativeMouseMode(SDL_FALSE); // Возвращаем мышь в меню
                     }
+
+                    // <<< ВОТ ОНА, НОВАЯ ЛОГИКА ПОДБОРА >>>
+                    if (e.key.keysym.sym == SDLK_e) {
+                        if (g_hands.heldObject) {
+                            // Если что-то держим - бросаем перед собой
+                            throwObject(&cam, 2.0f); // Слабый бросок
+                        } else if (g_targetedObject) {
+                            // Если на что-то смотрим - подбираем
+                            g_hands.heldObject = g_targetedObject;
+                            g_hands.heldObject->state = PICKUP_STATE_HELD;
+                            g_targetedObject = NULL;
+                        }
+                    }
+
                     // Вся остальная обработка ввода для игры
                     if (e.key.keysym.sym == SDLK_p) {
                         if (g_phone.state == PHONE_STATE_HIDDEN || g_phone.state == PHONE_STATE_HIDING) g_phone.state = PHONE_STATE_SHOWING;
@@ -4379,6 +4324,13 @@ spawnBottle((Vec3){-2, 0, -6});
                             cam.vy = config.jumpForce;
                         }
                     }
+
+                    if(e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT && g_hands.heldObject){
+                        throwObject(&cam, 15.0f); // Сильный бросок
+                    }
+
+                    if (e.key.keysym.sym == SDLK_F6) g_showCrosshair = !g_showCrosshair;
+
                     // F-КЛАВИШИ
                     if (e.key.keysym.sym == SDLK_F1) show_editor = !show_editor;
                     if (e.key.keysym.sym == SDLK_F3) g_showProfiler = !g_showProfiler;
@@ -4391,10 +4343,10 @@ spawnBottle((Vec3){-2, 0, -6});
                         SDL_SetRelativeMouseMode(SDL_FALSE);
                     }
                     if (e.key.keysym.sym == SDLK_SPACE && !cam.isCrouching) {
-        if (isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
-            cam.vy = config.jumpForce;
-        }
-    }
+                        if (isGrounded(&cam, playerRadius, collisionBoxes, numCollisionBoxes)) {
+                            cam.vy = config.jumpForce;
+                        }
+                    }
                     // Здесь будет логика мультиплеера
                     break;
             }
@@ -4432,7 +4384,7 @@ spawnBottle((Vec3){-2, 0, -6});
                 break;
 
         case STATE_SETTINGS:
-            drawSettingsMenu(ren, font, editorVars, numEditorVars);
+            drawSettingsMenu(ren, font, large_font, editorVars, numEditorVars);
             break;
             
         case STATE_IN_GAME_SP:
@@ -4597,11 +4549,6 @@ spawnBottle((Vec3){-2, 0, -6});
 
             updateCameraBob(&cam, deltaTime);
 
-            // Обновляем состояние и анимацию рук
-            updateHandsState(&cam, deltaTime);
-            updateHandsAnimation(&cam, deltaTime);
-            updateGravityGlove(&cam, deltaTime);
-
             Profiler_End(PROF_PHYSICS_COLLISIONS);
             Profiler_Start(PROF_GAME_LOGIC);
 
@@ -4644,6 +4591,8 @@ spawnBottle((Vec3){-2, 0, -6});
             // Применяем эффекты покачивания и тряски к этой временной камере
             renderCam.y += cam.currentBobY;
             renderCam.rotY += cam.currentBobX * 0.02f;
+
+            updateTractorBeam(&renderCam);
             
             if (g_cinematic.isActive) {
                 g_cinematic.fov = lerp(g_cinematic.fov, 150.0f, deltaTime * 2.0f); // Зум
@@ -4732,7 +4681,7 @@ spawnBottle((Vec3){-2, 0, -6});
             drawGlitches(ren, renderCam);
             drawBoss(ren, renderCam);
             drawTrajectory(ren, renderCam, &g_trajectory);
-            
+
             // Отрисовка куба с освещением
             float lightAngle = SDL_GetTicks() * 0.0003f;
             Vec3 lightDir = normalize((Vec3){fast_cos(lightAngle) * 1.5f, 2, fast_sin(lightAngle) * 1.5f});
@@ -4814,7 +4763,9 @@ spawnBottle((Vec3){-2, 0, -6});
                     break;
                 }
             }
-            
+
+            drawCrosshair(ren);
+
             Profiler_End(PROF_OTHER);
             Profiler_Update();
             

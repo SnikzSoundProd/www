@@ -3580,17 +3580,85 @@ void drawPhone(SDL_Renderer* ren, TTF_Font* font) {
     }
 }
 
+// === ВСТАВЬ ЭТУ НОВУЮ ФУНКЦИЮ ПЕРЕД drawFloor ===
+
+void drawStableWireframeFloor(SDL_Renderer* ren, Camera cam) {
+    SDL_Color gridColor = {60, 60, 70, 255};
+    float tileSize = 2.0f; // Такой же шаг, как у старой сетки
+
+    // <<< ВОТ ОНА, БЛЯДЬ, МАГИЯ: Мы берем цикл от старой сетки... >>>
+    for (int i = -20; i <= 20; i += 2) {
+        for (int j = -20; j <= 20; j += 2) {
+            
+            float x = (float)i;
+            float z = (float)j;
+
+            // <<< ...А ЛОГИКУ РИСОВАНИЯ - ОТ НОВОЙ! >>>
+            Vec3 corners[4] = {
+                {x, -2.0f, z},
+                {x + tileSize, -2.0f, z},
+                {x + tileSize, -2.0f, z + tileSize},
+                {x, -2.0f, z + tileSize}
+            };
+
+            // Рисуем квадрат + диагонали. Никакого, нахуй, Z-fighting'а.
+            clipAndDrawLine(ren, corners[0], corners[1], cam, gridColor);
+            clipAndDrawLine(ren, corners[1], corners[2], cam, gridColor);
+            clipAndDrawLine(ren, corners[2], corners[3], cam, gridColor);
+            clipAndDrawLine(ren, corners[3], corners[0], cam, gridColor);
+            clipAndDrawLine(ren, corners[0], corners[2], cam, gridColor);
+        }
+    }
+}
+
+// === ВСТАВЬ ЭТУ НОВУЮ ФУНКЦИЮ ПЕРЕД drawFloor ===
+
+void drawMultiplayerFloor(SDL_Renderer* ren, Camera cam) {
+    // <<< МЫ, БЛЯДЬ, ВЫРВАЛИ СЕРДЦЕ ИЗ СТАРОЙ ФУНКЦИИ >>>
+    // --- ЭТО ВСЕГДА ОХУЕННЫЙ, ПРОЦЕДУРНЫЙ ПОЛ ---
+    float tileSize = 4.0f;
+    int viewRange = 8; 
+
+    int camTileX = (int)floorf(cam.x / tileSize);
+    int camTileZ = (int)floorf(cam.z / tileSize);
+
+    for (int x = -viewRange; x <= viewRange; x++) {
+        for (int z = -viewRange; z <= viewRange; z++) {
+            float worldX = (camTileX + x) * tileSize;
+            float worldZ = (camTileZ + z) * tileSize;
+
+            float distSq = x*x + z*z;
+            if (distSq > viewRange * viewRange) continue;
+
+            Vec3 corners[4] = {
+                {worldX, -2.0f, worldZ},
+                {worldX + tileSize, -2.0f, worldZ},
+                {worldX + tileSize, -2.0f, worldZ + tileSize},
+                {worldX, -2.0f, worldZ + tileSize}
+            };
+
+            ProjectedPoint pp = project_with_depth(corners[0], cam);
+            if (pp.z < NEAR_PLANE) continue;
+
+            // В МП пол всегда будет одного, сука, стиля. Четкого.
+            SDL_Color tileColor = (( (int)(worldX/tileSize) + (int)(worldZ/tileSize) ) % 2 == 0) ? 
+                                  (SDL_Color){45, 45, 55, 255} : 
+                                  (SDL_Color){35, 35, 45, 255};
+            
+            clipAndDrawLine(ren, corners[0], corners[1], cam, tileColor);
+            clipAndDrawLine(ren, corners[1], corners[2], cam, tileColor);
+            clipAndDrawLine(ren, corners[2], corners[3], cam, tileColor);
+            clipAndDrawLine(ren, corners[3], corners[0], cam, tileColor);
+            clipAndDrawLine(ren, corners[0], corners[2], cam, tileColor);
+        }
+    }
+}
+
 // === ЗАМЕНИ СТАРУЮ drawFloor НА ЭТУ ===
 void drawFloor(SDL_Renderer* ren, Camera cam) {
     // Если мир еще на ранней стадии, рисуем простую сетку
     if (g_worldEvolution.currentState < WORLD_STATE_MATERIALIZING) {
-        SDL_Color gridColor = {60, 60, 70, 255};
-        for (int i = -20; i <= 20; i += 2) {
-            Vec3 p1_v = {(float)i, -2.0f, -20.0f}, p2_v = {(float)i, -2.0f, 20.0f};
-            clipAndDrawLine(ren, p1_v, p2_v, cam, gridColor);
-            Vec3 p1_h = {-20.0f, -2.0f, (float)i}, p2_h = {20.0f, -2.0f, (float)i};
-            clipAndDrawLine(ren, p1_h, p2_h, cam, gridColor);
-        }
+        drawStableWireframeFloor(ren, cam); // <<< ВОТ ОНА, БЛЯДЬ!
         return;
     }
 
@@ -4801,7 +4869,7 @@ spawnBottle((Vec3){-2, 0, -6});
                 SDL_SetRenderDrawColor(ren, 20, 20, 30, 255);
                 SDL_RenderClear(ren);
                 clearZBuffer();
-                drawFloor(ren, cam);
+                drawMultiplayerFloor(ren, cam);
                 
                 // <<< ВОТ ОН, ФИКС №2: Правильная отрисовка игроков >>>
                 SDL_Color playerColors[] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}, {255,255,0,255}};

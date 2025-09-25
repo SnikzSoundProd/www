@@ -627,7 +627,7 @@ Coin g_coins[50];
 int g_numCoins = 0;
 Phone g_phone;
 DayNightCycle g_dayNight;
-float g_zBuffer[HEIGHT][WIDTH];
+float** g_zBuffer;
 float g_timeScale = 1.0f;
 PickupObject g_pickups[MAX_PICKUPS];
 int g_numPickups = 0;
@@ -4108,6 +4108,10 @@ int main(int argc, char* argv[]) {
 
     SDL_GetWindowSize(win, &g_window_width, &g_window_height);
     printf("Window created with size: %d x %d\n", g_window_width, g_window_height);
+
+    printf("allocating Z-Buffer...\n");
+    g_zBuffer = (float**)malloc(g_window_height * sizeof(float**));
+    for (int i = 0; i < g_window_height; i++) {g_zBuffer[i] = (float*)malloc(g_window_width * sizeof(float));}
     SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
     SDL_RenderClear(ren);
     TTF_Font* font = TTF_OpenFont("arial.ttf", 24); 
@@ -4882,6 +4886,10 @@ spawnBottle((Vec3){-2, 0, -6});
     TTF_Quit();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
+    printf("Freeing Z-Buffer...\n");
+    for (int i = 0; i < g_window_height; i++) {free(g_zBuffer[i]);
+    }
+    free(g_zBuffer);
     SDL_Quit();
     
     return 0;

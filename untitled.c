@@ -2865,7 +2865,7 @@ void drawQuestUI(SDL_Renderer* ren, TTF_Font* font, QuestSystem* qs) {
     char coinCounter[64];
     snprintf(coinCounter, 64, "Coins: %d/%d", g_coinsCollected, g_numCoins);
     SDL_Color gold = {255, 215, 0, 255};
-    drawText(ren, font, coinCounter, 20, g_windows_height - 40, gold);
+    drawText(ren, font, coinCounter, 20, g_window_height - 40, gold);
 }
 
 void spawnGlitches(int count) {
@@ -3767,14 +3767,14 @@ void drawMainMenu(SDL_Renderer* ren, TTF_Font* font) {
     int text_w, text_h;
     TTF_SizeUTF8(font, g_current_splash, &text_w, &text_h);
     // Рисуем чуть выше и правее заголовка
-    drawText(ren, font, g_current_splash, g_windows_width/2 - 100 + text_w / 2, g_windows_height/2 - 120, splashColor);
+    drawText(ren, font, g_current_splash, g_window_width/2 - 100 + text_w / 2, g_window_height/2 - 120, splashColor);
     
     // --- Рисуем пункты меню ---
     const char* menuItems[] = { "Single Player", "Multiplayer", "Settings", "Exit" };
     for (int i = 0; i < 4; i++) {
         char itemText[128];
         snprintf(itemText, sizeof(itemText), "%s %s", (i == g_menuSelectedOption) ? ">" : " ", menuItems[i]);
-        drawText(ren, font, itemText, g_windows_width/2 - 100, g_windows_height/2 + 20 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
+        drawText(ren, font, itemText, g_window_width/2 - 100, g_window_height/2 + 20 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
     }
 
 }
@@ -3789,7 +3789,7 @@ void drawMultiplayerMenu(SDL_Renderer* ren, TTF_Font* font) {
     SDL_Color optionColor = {200, 200, 200, 255};
     SDL_Color selectedColor = {255, 255, 0, 255};
 
-    drawText(ren, font, "MULTIPLAYER", g_windows_width/2 - 100, 100, titleColor);
+    drawText(ren, font, "MULTIPLAYER", g_window_width/2 - 100, 100, titleColor);
 
     // <<< ВОТ ОНА, БЛЯДЬ, ПРОВЕРКА, КОТОРОЙ НЕ ХВАТАЛО >>>
     if (g_mp_menu_state == MP_MENU_SELECT) {
@@ -3798,27 +3798,27 @@ void drawMultiplayerMenu(SDL_Renderer* ren, TTF_Font* font) {
         for (int i = 0; i < 3; i++) {
             char itemText[128];
             snprintf(itemText, sizeof(itemText), "%s %s", (i == g_menuSelectedOption) ? ">" : " ", menuItems[i]);
-            drawText(ren, font, itemText, g_windows_width/2 - 100, 200 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
+            drawText(ren, font, itemText, g_window_width/2 - 100, 200 + i * 40, (i == g_menuSelectedOption) ? selectedColor : optionColor);
         }
-        drawText(ren, font, "Host: To find your IP, open Google and search 'my ip address'", 20, g_windows_height - 50, (SDL_Color){100,100,100,255});
+        drawText(ren, font, "Host: To find your IP, open Google and search 'my ip address'", 20, g_window_height - 50, (SDL_Color){100,100,100,255});
 
     } else if (g_mp_menu_state == MP_MENU_INPUT_IP) {
         // Рисуем поле для ввода IP
-        drawText(ren, font, "Enter Host IP Address:", g_windows_width/2 - 150, 200, optionColor);
+        drawText(ren, font, "Enter Host IP Address:", g_window_width/2 - 150, 200, optionColor);
         
         char inputLine[128];
         snprintf(inputLine, sizeof(inputLine), "> %s", g_ip_input_buffer);
-        drawText(ren, font, inputLine, g_windows_width/2 - 150, 240, selectedColor);
+        drawText(ren, font, inputLine, g_window_width/2 - 150, 240, selectedColor);
 
         // Мигающий курсор
         if ((SDL_GetTicks() / 500) % 2 == 0) {
             int text_w, text_h;
             TTF_SizeUTF8(font, inputLine, &text_w, &text_h);
-            SDL_Rect cursorRect = { g_windows_width/2 - 150 + text_w, 240, 10, 20 };
+            SDL_Rect cursorRect = { g_window_width/2 - 150 + text_w, 240, 10, 20 };
             SDL_SetRenderDrawColor(ren, selectedColor.r, selectedColor.g, selectedColor.b, 255);
             SDL_RenderFillRect(ren, &cursorRect);
         }
-        drawText(ren, font, "Press [Enter] to connect, [Escape] to cancel", 20, g_windows_height - 50, (SDL_Color){100,100,100,255});
+        drawText(ren, font, "Press [Enter] to connect, [Escape] to cancel", 20, g_window_height - 50, (SDL_Color){100,100,100,255});
     }
 }
 
@@ -3881,12 +3881,12 @@ void drawSettingsMenu(SDL_Renderer* ren, TTF_Font* font, TTF_Font* large_font, E
         const char* face = SETTINGS_FACES[g_settingsSelectedOption];
         int face_w, face_h;
         TTF_SizeUTF8(large_font, face, &face_w, &face_h);
-        drawText(ren, large_font, face, g_windows_width / 2 - face_w / 2, g_windows_height / 2 - 100, selectedColor);
+        drawText(ren, large_font, face, g_window_width / 2 - face_w / 2, g_window_height / 2 - 100, selectedColor);
 
         // 2. Рисуем фон для описания внизу
         SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 180);
-        SDL_Rect bgRect = { 0, g_windows_height - 100, g_windows_width, 100 };
+        SDL_Rect bgRect = { 0, g_window_height - 100, g_window_width, 100 };
         SDL_RenderFillRect(ren, &bgRect);
 
         // 3. Собираем и рисуем текст
@@ -3895,13 +3895,13 @@ void drawSettingsMenu(SDL_Renderer* ren, TTF_Font* font, TTF_Font* large_font, E
                  SETTINGS_DESCRIPTIONS[g_settingsSelectedOption], 
                  SETTINGS_REMARKS[g_settingsSelectedOption]);
         
-        drawText(ren, font, full_text, 50, g_windows_height - 70, optionColor);
+        drawText(ren, font, full_text, 50, g_window_height - 70, optionColor);
     }
 }
 
 void clearZBuffer() {
-    for (int y = 0; y < g_windows_height; y++) {
-        for (int x = 0; x < g_windows_width; x++) {
+    for (int y = 0; y < g_window_height; y++) {
+        for (int x = 0; x < g_window_width; x++) {
             // Заполняем буфер "бесконечностью", чтобы любой первый пиксель
             // был ближе, чем это значение.
             g_zBuffer[y][x] = INFINITY;
@@ -4102,7 +4102,7 @@ int main(int argc, char* argv[]) {
     init_fast_math(); // Математику считаем до окна, это быстро
     init_multiplayer();
 
-    SDL_Window* win = SDL_CreateWindow("GEOMETRICA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, g_windows_width, g_windows_height, SDL_WINDOW_SHOWN);
+    SDL_Window* win = SDL_CreateWindow("GEOMETRICA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, g_window_width, g_window_height, SDL_WINDOW_SHOWN);
     if (!win) return 1;
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
 
@@ -4112,7 +4112,7 @@ int main(int argc, char* argv[]) {
     SDL_RenderClear(ren);
     TTF_Font* font = TTF_OpenFont("arial.ttf", 24); 
     if (font) {
-        drawText(ren, font, "INITIALIZING REALITY KERNEL...", g_windows_width/2 - 200, g_windows_height/2, (SDL_Color){0, 255, 100, 255});
+        drawText(ren, font, "INITIALIZING REALITY KERNEL...", g_window_width/2 - 200, g_window_height/2, (SDL_Color){0, 255, 100, 255});
     }
     SDL_RenderPresent(ren);
 
@@ -4716,7 +4716,7 @@ spawnBottle((Vec3){-2, 0, -6});
                         stateName[g_worldEvolution.currentState],
                         g_worldEvolution.transitionProgress * 100);
                 SDL_Color cyan = {0, 255, 255, 255};
-                drawText(ren, font, evolutionStatus, g_windows_width/2 - 100, 10, cyan);
+                drawText(ren, font, evolutionStatus, g_window_width/2 - 100, 10, cyan);
             }
 
             drawQuestConnections(ren, &questSystem, renderCam, SDL_GetTicks() * 0.001f);
@@ -4761,7 +4761,7 @@ spawnBottle((Vec3){-2, 0, -6});
                 
                 if (dist < 2.0f && node->status == QUEST_AVAILABLE) {
                     SDL_Color white = {255, 255, 255, 255};
-                    drawText(ren, font, "Press [E] to accept quest", g_windows_width/2 - 100, g_windows_height - 50, white);
+                    drawText(ren, font, "Press [E] to accept quest", g_window_width/2 - 100, g_window_height - 50, white);
                     break;
                 }
             }
@@ -4775,11 +4775,11 @@ spawnBottle((Vec3){-2, 0, -6});
 
             if (g_phone.state == PHONE_STATE_VISIBLE || g_phone.state == PHONE_STATE_SHOWING) {
                 const int phoneWidth = 250, phoneHeight = 500;
-                int currentY = (int)lerp((float)g_windows_height, (float)(g_windows_height - phoneHeight - 50), g_phone.animationProgress);
+                int currentY = (int)lerp((float)g_window_height, (float)(g_window_height - phoneHeight - 50), g_phone.animationProgress);
 
                 SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
                 SDL_SetRenderDrawColor(ren, 25, 25, 30, 230);
-                SDL_Rect phoneBody = { g_windows_width - phoneWidth - 50, currentY, phoneWidth, phoneHeight };
+                SDL_Rect phoneBody = { g_window_width - phoneWidth - 50, currentY, phoneWidth, phoneHeight };
                 SDL_RenderFillRect(ren, &phoneBody);
                 
                 SDL_Color textColor = {200, 200, 200, 255};
@@ -4790,10 +4790,10 @@ spawnBottle((Vec3){-2, 0, -6});
             
             // Кинематографичные полосы
             if (g_cinematic.isActive) {
-                int barHeight = g_windows_height / 8;
+                int barHeight = g_window_height / 8;
                 SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-                SDL_Rect topBar = {0, 0, g_windows_width, barHeight};
-                SDL_Rect bottomBar = {0, g_windows_height - barHeight, g_windows_width, barHeight};
+                SDL_Rect topBar = {0, 0, g_window_width, barHeight};
+                SDL_Rect bottomBar = {0, g_window_height - barHeight, g_window_width, barHeight};
                 SDL_RenderFillRect(ren, &topBar);
                 SDL_RenderFillRect(ren, &bottomBar);
             }
@@ -4873,7 +4873,7 @@ spawnBottle((Vec3){-2, 0, -6});
         }
         SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(ren, 0, 0, 0, (Uint8)g_exitFadeAlpha);
-        SDL_Rect fadeRect = {0, 0, g_windows_width, g_windows_height};
+        SDL_Rect fadeRect = {0, 0, g_window_width, g_window_height};
         SDL_RenderFillRect(ren, &fadeRect);
     }
     SDL_RenderPresent(ren);

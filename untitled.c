@@ -24,8 +24,6 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #define DAY_NIGHT_DURATION_SECONDS (48.0f * 60.0f)
 #define SKY_RADIUS 100.0f
 #define ASSET_TABLE_SIZE 128
-#define WIDTH 1920
-#define HEIGHT 1080
 
 #define AIR_ACCELERATION 2.0f
 #define AIR_DECELERATION 0.5f
@@ -552,6 +550,8 @@ typedef enum {
     STATE_IN_GAME_MP
 } GameState;
 
+int g_window_width = 1920;
+int g_window_height = 1080;
 // === ДОБАВЬ ЭТОТ ENUM ===
 typedef enum {
     MP_MENU_SELECT,
@@ -4105,7 +4105,9 @@ int main(int argc, char* argv[]) {
     SDL_Window* win = SDL_CreateWindow("GEOMETRICA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
     if (!win) return 1;
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
-    
+
+    SDL_GetWindowSize(win, &g_window_width, &g_window_height);
+    printf("Window created with size: %d x %d\n", g_window_width, g_window_height);
     SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
     SDL_RenderClear(ren);
     TTF_Font* font = TTF_OpenFont("arial.ttf", 24); 

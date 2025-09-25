@@ -4102,7 +4102,7 @@ int main(int argc, char* argv[]) {
     init_fast_math(); // Математику считаем до окна, это быстро
     init_multiplayer();
 
-    SDL_Window* win = SDL_CreateWindow("GEOMETRICA", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, g_window_width, g_window_height, SDL_WINDOW_SHOWN);
+    SDL_Window* win = SDL_CreateWindow("GEOMETRICA", 0, 0, 0, 0, SDL_WINDOW_SHOWN);
     if (!win) return 1;
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
 
